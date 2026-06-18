@@ -15,8 +15,8 @@ const PROJECT_ID = process.env.GOOGLE_PROJECT_ID;
 const PORT = Number(process.env.PORT ?? 3000);
 
 if (!PROJECT_ID) {
-  console.error('環境変数 GOOGLE_PROJECT_ID が必要です');
-  process.exit(1);
+  // Vercel では process.exit は使わず例外で落とす（Function のエラーとして表面化させる）
+  throw new Error('環境変数 GOOGLE_PROJECT_ID が必要です');
 }
 
 const app = new Hono();
@@ -49,8 +49,15 @@ app.post('/optimize', async (c) => {
   }
 });
 
-serve({ fetch: app.fetch, port: PORT }, (info) => {
-  console.log(`Server listening on http://localhost:${info.port}`);
-  console.log(`  GET  /health`);
-  console.log(`  POST /optimize`);
-});
+// Vercel ではこの default export が自動的に Function として実行される
+export default app;
+
+// ローカル開発（make dev-server）でのみ Node サーバーを起動する。
+// Vercel 実行環境では VERCEL=1 が自動設定されるため、ここは実行されない。
+if (!process.env.VERCEL) {
+  serve({ fetch: app.fetch, port: PORT }, (info) => {
+    console.log(`Server listening on http://localhost:${info.port}`);
+    console.log(`  GET  /health`);
+    console.log(`  POST /optimize`);
+  });
+}

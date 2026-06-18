@@ -9,6 +9,12 @@ import {
   persistSnapshots,
 } from '../lib/calcHistory';
 import { SAMPLE_SNAPSHOTS } from '../lib/sampleSnapshot';
+import {
+  type VehicleCostFavorite,
+  loadVehicleCostFavorites,
+  persistVehicleCostFavorites,
+  sameVehicleCost,
+} from '../lib/vehicleCostFavorites';
 import { color, radius, shadow, space } from '../theme';
 // Polyline は @react-google-maps/api 側のクリーンアップが信頼できないため
 // google.maps.Polyline を直接 ref で管理する
@@ -152,6 +158,16 @@ const DEFAULT_VEHICLE_COST: VehicleCost = {
   costPerTraveledHour: 0,
   costPerKilometer: 0,
   fixedCost: 0,
+};
+
+// 車両コストを、お気に入りチップ用の短いラベルに（0 のフィールドは省く）
+const vehicleCostLabel = (c: VehicleCost): string => {
+  const parts: string[] = [];
+  if (c.costPerHour) parts.push(`時${c.costPerHour}`);
+  if (c.costPerTraveledHour) parts.push(`移${c.costPerTraveledHour}`);
+  if (c.costPerKilometer) parts.push(`距${c.costPerKilometer}`);
+  if (c.fixedCost) parts.push(`固${c.fixedCost}`);
+  return parts.length ? parts.join(' / ') : 'すべて0';
 };
 
 const buildRequest = (
@@ -784,6 +800,9 @@ export function EditorPage() {
   const [start, setStart] = useState<LatLng | null>(null);
   const [end, setEnd] = useState<LatLng | null>(null);
   const [vehicleCost, setVehicleCost] = useState<VehicleCost>(DEFAULT_VEHICLE_COST);
+  const [costFavorites, setCostFavorites] = useState<VehicleCostFavorite[]>(loadVehicleCostFavorites);
+  // 非制御の車両コスト input を外部更新時に再マウントするためのシード（インクリメントで remount）
+  const [costSeed, setCostSeed] = useState(0);
   // null = グローバル時間枠を設定しない（リクエストから globalStart/EndTime を省く）
   const [globalWindow, setGlobalWindow] = useState<GlobalWindow | null>(DEFAULT_GLOBAL_WINDOW);
   const [result, setResult] = useState<OptimizeResponse | null>(null);
@@ -797,6 +816,9 @@ export function EditorPage() {
   useEffect(() => {
     persistSnapshots(snapshots);
   }, [snapshots]);
+  useEffect(() => {
+    persistVehicleCostFavorites(costFavorites);
+  }, [costFavorites]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentLocation, setCurrentLocation] = useState<LatLng | null>(null);
@@ -897,6 +919,22 @@ export function EditorPage() {
     setError(null);
   };
 
+  // 現在の車両コストをお気に入りに登録（同値が既にあれば追加しない）
+  const saveCostFavorite = () => {
+    setCostFavorites((prev) =>
+      prev.some((f) => sameVehicleCost(f.cost, vehicleCost))
+        ? prev
+        : [{ id: makeId(), cost: { ...vehicleCost } }, ...prev]
+    );
+  };
+  const applyCostFavorite = (cost: VehicleCost) => {
+    setVehicleCost(cost);
+    setCostSeed((s) => s + 1); // 非制御 input を再マウントして適用値を反映
+    setResult(null);
+  };
+  const removeCostFavorite = (id: string) =>
+    setCostFavorites((prev) => prev.filter((f) => f.id !== id));
+
   // 履歴のスナップショットをエディタに復元（入力一式 + 結果を反映）
   const restoreSnapshot = (snap: CalcSnapshot) => {
     setPickups(snap.input.pickups);
@@ -904,6 +942,7 @@ export function EditorPage() {
     setStart(snap.input.start);
     setEnd(snap.input.end);
     setVehicleCost(snap.input.vehicleCost);
+    setCostSeed((s) => s + 1); // 非制御 input を再マウントして復元値を反映
     // 旧スナップショット（globalWindow 無し）はデフォルト、明示的 null は未設定として復元
     setGlobalWindow(
       snap.input.globalWindow === undefined ? DEFAULT_GLOBAL_WINDOW : snap.input.globalWindow
@@ -1422,16 +1461,20 @@ export function EditorPage() {
                   {label}
                 </label>
                 <input
+                  // 非制御（defaultValue）にしているのは、制御＋数値だと "1." のような
+                  // 入力途中が毎キーストロークで数値へ丸められ、小数点・末尾0 を打てないため。
+                  // 外部から値を変える場合（お気に入り適用・デフォルト復帰・履歴復元）は
+                  // costSeed を更新して input を再マウントし、defaultValue を反映させる。
+                  key={`${key}-${costSeed}`}
                   type="number"
                   min={0}
-                  step={1}
-                  // 0 は「コストなし」を意味し、リクエストにも含めない（下の補足参照）。
-                  // 0 を空表示にしておかないと、値型の制御 input がキー入力のたびに
-                  // "0" を差し戻し、フィールドを消去・編集できず「キーボードで打てない」状態になる。
-                  value={vehicleCost[key] === 0 ? '' : vehicleCost[key]}
+                  step="any"
+                  inputMode="decimal"
+                  defaultValue={vehicleCost[key] === 0 ? '' : vehicleCost[key]}
                   placeholder="0"
                   onChange={(e) => {
-                    const v = e.target.value === '' ? 0 : Number(e.target.value);
+                    const n = Number(e.target.value);
+                    const v = e.target.value === '' || Number.isNaN(n) ? 0 : n;
                     setVehicleCost((c) => ({ ...c, [key]: v }));
                     setResult(null);
                   }}
@@ -1443,13 +1486,81 @@ export function EditorPage() {
           <p style={{ color: '#666', fontSize: '11px', marginTop: '6px' }}>
             ソフト制約の違反コストとの<strong>相対値</strong>で挙動が決まります。0 のコストはリクエストに含めません。
           </p>
+
+          {/* お気に入り（車両コストのプリセット）。localStorage に保存し、ワンタップで適用できる。 */}
+          <div style={{ marginTop: '8px', borderTop: '1px solid #eee', paddingTop: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ fontSize: '11px', color: '#666' }}>お気に入り</span>
+              <button
+                onClick={saveCostFavorite}
+                title="現在の車両コストをお気に入りに登録"
+                style={CLEAR_BTN_STYLE}
+              >
+                ★ 現在の値を登録
+              </button>
+            </div>
+            {costFavorites.length > 0 ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
+                {costFavorites.map((f) => (
+                  <span
+                    key={f.id}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      border: '1px solid #d5d5d5',
+                      borderRadius: '999px',
+                      background: '#fff',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <button
+                      onClick={() => applyCostFavorite(f.cost)}
+                      title="この値を適用"
+                      style={{
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        color: '#555',
+                        fontSize: '10px',
+                        padding: '2px 7px',
+                      }}
+                    >
+                      {vehicleCostLabel(f.cost)}
+                    </button>
+                    <button
+                      onClick={() => removeCostFavorite(f.id)}
+                      title="このお気に入りを削除"
+                      style={{
+                        border: 'none',
+                        borderLeft: '1px solid #eee',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        color: '#bbb',
+                        fontSize: '11px',
+                        lineHeight: 1,
+                        padding: '2px 5px',
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p style={{ color: '#999', fontSize: '10px', margin: '6px 0 0' }}>
+                登録なし。現在の値を登録すると、ここからワンタップで呼び出せます。
+              </p>
+            )}
+          </div>
+
           <button
             onClick={() => {
               setVehicleCost(DEFAULT_VEHICLE_COST);
+              setCostSeed((s) => s + 1); // 非制御 input を再マウントして既定値を反映
               setResult(null);
             }}
             style={{
-              marginTop: '4px',
+              marginTop: '8px',
               border: 'none',
               background: 'transparent',
               cursor: 'pointer',

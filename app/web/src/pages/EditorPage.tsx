@@ -41,9 +41,12 @@ const DEFAULT_SOFT_COST = 10;
 
 // 日付は固定（hh:mm 入力と組み合わせて RFC3339 タイムスタンプを生成）
 const FIXED_DATE = '2024-02-13';
-const GLOBAL_START_ISO = `${FIXED_DATE}T00:00:00Z`;
-const GLOBAL_END_ISO = `${FIXED_DATE}T23:59:59Z`;
 const toIsoTime = (hhmm: string) => `${FIXED_DATE}T${hhmm}:00Z`;
+
+// 最適化の全体時間枠（全ルートがこの範囲内で完結する）。各地点の時間枠はこの範囲に収める。
+// hh:mm（UTC, FIXED_DATE 上で解釈）で保持する。
+export type GlobalWindow = { start: string; end: string };
+const DEFAULT_GLOBAL_WINDOW: GlobalWindow = { start: '00:00', end: '23:59' };
 
 // ハード／ソフト両方をまとめて 1 つの timeWindow に詰める。
 // いずれも未設定なら undefined（= 時間制約なし）。
@@ -156,7 +159,8 @@ const buildRequest = (
   deliveries: Point[],
   start: LatLng,
   end: LatLng,
-  vehicleCost: VehicleCost
+  vehicleCost: VehicleCost,
+  globalWindow: GlobalWindow
 ) => ({
   timeout: '10s',
   // ルート全体の道路に沿ったポリラインを routes[].routePolyline.points に格納させる
@@ -165,9 +169,9 @@ const buildRequest = (
   // （区間ごとの色分け・選択ハイライト等の用途で利用可能）
   populateTransitionPolylines: true,
   model: {
-    // 時間枠を有効に解釈させるため固定日付の 1 日全体をグローバル範囲に設定
-    globalStartTime: GLOBAL_START_ISO,
-    globalEndTime: GLOBAL_END_ISO,
+    // 時間枠を有効に解釈させるためのグローバル範囲（固定日付上の hh:mm）
+    globalStartTime: toIsoTime(globalWindow.start),
+    globalEndTime: toIsoTime(globalWindow.end),
     shipments: pickups.map((p, i) => {
       const pickupTw = buildTimeWindows(p);
       const deliveryTw = buildTimeWindows(deliveries[i]);
@@ -296,6 +300,18 @@ const costInfo = (key: string): { label: string; penalty: boolean } => {
   return { label: hit?.label ?? key, penalty: hit?.penalty ?? false };
 };
 
+// ハード枠／ソフト枠それぞれの「クリア」ボタン共通スタイル（小さめのアウトラインボタン）
+const CLEAR_BTN_STYLE: React.CSSProperties = {
+  border: '1px solid #d5d5d5',
+  background: '#fff',
+  cursor: 'pointer',
+  color: '#777',
+  fontSize: '10px',
+  lineHeight: 1.5,
+  padding: '1px 7px',
+  borderRadius: '999px',
+};
+
 const PointRow: React.FC<{
   prefix: string;
   point: Point;
@@ -355,6 +371,15 @@ const PointRow: React.FC<{
           onChange={(e) => onChange({ endTime: e.target.value || undefined })}
           style={{ fontSize: '11px', padding: '2px 4px' }}
         />
+        {(point.startTime || point.endTime) && (
+          <button
+            onClick={() => onChange({ startTime: undefined, endTime: undefined })}
+            title="ハード枠をクリア"
+            style={CLEAR_BTN_STYLE}
+          >
+            クリア
+          </button>
+        )}
         <button
           onClick={() => setShowSoft((s) => !s)}
           title="ソフト制約（違反するとコストが発生する時間枠）を設定"
@@ -430,6 +455,25 @@ const PointRow: React.FC<{
             />
             <span>/h</span>
           </div>
+          {(point.softStartTime ||
+            point.softEndTime ||
+            point.costPerHourBeforeSoftStartTime !== undefined ||
+            point.costPerHourAfterSoftEndTime !== undefined) && (
+            <button
+              onClick={() =>
+                onChange({
+                  softStartTime: undefined,
+                  softEndTime: undefined,
+                  costPerHourBeforeSoftStartTime: undefined,
+                  costPerHourAfterSoftEndTime: undefined,
+                })
+              }
+              title="ソフト枠をクリア"
+              style={{ ...CLEAR_BTN_STYLE, marginLeft: 0, marginTop: '3px' }}
+            >
+              クリア
+            </button>
+          )}
         </div>
       )}
 
@@ -471,31 +515,6 @@ const PointRow: React.FC<{
         </div>
       )}
 
-      {(point.startTime || point.endTime || hasSoft) && (
-        <button
-          onClick={() =>
-            onChange({
-              startTime: undefined,
-              endTime: undefined,
-              softStartTime: undefined,
-              softEndTime: undefined,
-              costPerHourBeforeSoftStartTime: undefined,
-              costPerHourAfterSoftEndTime: undefined,
-            })
-          }
-          title="時間枠をすべてクリア"
-          style={{
-            border: 'none',
-            background: 'transparent',
-            cursor: 'pointer',
-            color: '#999',
-            fontSize: '11px',
-            marginTop: '3px',
-          }}
-        >
-          clear all
-        </button>
-      )}
     </div>
   );
 };
@@ -747,6 +766,7 @@ export function EditorPage() {
   const [start, setStart] = useState<LatLng | null>(null);
   const [end, setEnd] = useState<LatLng | null>(null);
   const [vehicleCost, setVehicleCost] = useState<VehicleCost>(DEFAULT_VEHICLE_COST);
+  const [globalWindow, setGlobalWindow] = useState<GlobalWindow>(DEFAULT_GLOBAL_WINDOW);
   const [result, setResult] = useState<OptimizeResponse | null>(null);
 
   // 計算履歴（入力＋結果）。localStorage に永続化し、favorite で履歴/お気に入りを分ける。
@@ -865,6 +885,7 @@ export function EditorPage() {
     setStart(snap.input.start);
     setEnd(snap.input.end);
     setVehicleCost(snap.input.vehicleCost);
+    setGlobalWindow(snap.input.globalWindow ?? DEFAULT_GLOBAL_WINDOW);
     setResult(snap.result ?? null); // サンプル等、結果未計算なら地図はマーカーのみ
     setError(null);
   };
@@ -913,7 +934,7 @@ export function EditorPage() {
       setResult(null);
     });
     try {
-      const body = buildRequest(pickups, deliveries, start, end, vehicleCost);
+      const body = buildRequest(pickups, deliveries, start, end, vehicleCost, globalWindow);
       const res = await fetch(`${apiBase}/optimize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -930,7 +951,7 @@ export function EditorPage() {
         id: makeId(),
         createdAt: Date.now(),
         favorite: false,
-        input: { pickups, deliveries, start, end, vehicleCost },
+        input: { pickups, deliveries, start, end, vehicleCost, globalWindow },
         result: data,
       };
       setSnapshots((prev) => addSnapshot(prev, snap));
@@ -1267,6 +1288,48 @@ export function EditorPage() {
           <p style={{ color: '#666', fontSize: '11px', marginTop: '6px', marginBottom: 0 }}>
             地図をクリックして配置。Pickup と Delivery は同数必要、index 順にペア。
           </p>
+        </Section>
+
+        <Section role="input" title="グローバル時間枠（最適化の全体範囲）">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#444' }}>
+            <span style={{ fontSize: '12px' }}>開始</span>
+            <input
+              type="time"
+              value={globalWindow.start}
+              onChange={(e) => {
+                setGlobalWindow((w) => ({ ...w, start: e.target.value || DEFAULT_GLOBAL_WINDOW.start }));
+                setResult(null);
+              }}
+              style={{ fontSize: '12px', padding: '3px 4px' }}
+            />
+            <span style={{ fontSize: '12px' }}>〜</span>
+            <span style={{ fontSize: '12px' }}>終了</span>
+            <input
+              type="time"
+              value={globalWindow.end}
+              onChange={(e) => {
+                setGlobalWindow((w) => ({ ...w, end: e.target.value || DEFAULT_GLOBAL_WINDOW.end }));
+                setResult(null);
+              }}
+              style={{ fontSize: '12px', padding: '3px 4px' }}
+            />
+          </div>
+          <p style={{ color: '#666', fontSize: '11px', marginTop: '6px', marginBottom: 0 }}>
+            全ルートがこの範囲内で完結します。各地点のハード／ソフト枠はこの範囲に収めてください。
+          </p>
+          {(globalWindow.start !== DEFAULT_GLOBAL_WINDOW.start ||
+            globalWindow.end !== DEFAULT_GLOBAL_WINDOW.end) && (
+            <button
+              onClick={() => {
+                setGlobalWindow(DEFAULT_GLOBAL_WINDOW);
+                setResult(null);
+              }}
+              title="デフォルト（00:00〜23:59）に戻す"
+              style={{ ...CLEAR_BTN_STYLE, marginTop: '6px' }}
+            >
+              デフォルトに戻す
+            </button>
+          )}
         </Section>
 
         <Section role="input" title="車両コスト（最適化パラメータ）">

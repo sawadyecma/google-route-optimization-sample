@@ -708,6 +708,7 @@ const ResizableScroll: React.FC<{
         {children}
       </div>
       <div
+        data-tour="section-resizer"
         onMouseDown={(e) => {
           e.preventDefault();
           startRef.current = { y: e.clientY, h: height };
@@ -1305,6 +1306,7 @@ export function EditorPage() {
         .col-resizer.dragging .col-resizer-dot { background-color: #9aa0a6; }
       `}</style>
       <div
+        data-tour="col-resizer"
         onMouseDown={(e) => {
           e.preventDefault();
           setResizing(true);

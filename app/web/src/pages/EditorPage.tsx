@@ -1298,7 +1298,11 @@ export function EditorPage() {
                   type="number"
                   min={0}
                   step={1}
-                  value={vehicleCost[key]}
+                  // 0 は「コストなし」を意味し、リクエストにも含めない（下の補足参照）。
+                  // 0 を空表示にしておかないと、値型の制御 input がキー入力のたびに
+                  // "0" を差し戻し、フィールドを消去・編集できず「キーボードで打てない」状態になる。
+                  value={vehicleCost[key] === 0 ? '' : vehicleCost[key]}
+                  placeholder="0"
                   onChange={(e) => {
                     const v = e.target.value === '' ? 0 : Number(e.target.value);
                     setVehicleCost((c) => ({ ...c, [key]: v }));

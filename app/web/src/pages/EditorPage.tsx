@@ -573,10 +573,13 @@ const Section: React.FC<{
   role: 'input' | 'output' | 'history';
   title: string;
   children: React.ReactNode;
-}> = ({ role, title, children }) => {
+  // チュートリアルツアーのスポットライト対象にするための目印（任意）
+  dataTour?: string;
+}> = ({ role, title, children, dataTour }) => {
   const { accent, label } = SECTION_META[role];
   return (
     <div
+      data-tour={dataTour}
       style={{
         backgroundColor: color.surface,
         borderRadius: radius.md,
@@ -1155,7 +1158,7 @@ export function EditorPage() {
           }}
         />
       )}
-      <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
+      <div data-tour="map" style={{ flex: 1, minWidth: 0, position: 'relative' }}>
         <GoogleMap
           mapContainerStyle={{ width: '100%', height: '100%' }}
           center={{ lat: center.latitude, lng: center.longitude }}
@@ -1363,7 +1366,7 @@ export function EditorPage() {
           </div>
         )}
 
-        <Section role="input" title="クリック時に追加する種別">
+        <Section role="input" title="クリック時に追加する種別" dataTour="mode">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
             {(['pickup', 'delivery', 'start', 'end'] as Mode[]).map((m) => (
               <button
@@ -1388,7 +1391,7 @@ export function EditorPage() {
           </p>
         </Section>
 
-        <Section role="input" title="グローバル時間枠（最適化の全体範囲）">
+        <Section role="input" title="グローバル時間枠（最適化の全体範囲）" dataTour="global-window">
           {globalWindow ? (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#444' }}>
@@ -1453,7 +1456,7 @@ export function EditorPage() {
           )}
         </Section>
 
-        <Section role="input" title="車両コスト（最適化パラメータ）">
+        <Section role="input" title="車両コスト（最適化パラメータ）" dataTour="vehicle-cost">
           <div
             style={{
               display: 'grid',
@@ -1581,7 +1584,7 @@ export function EditorPage() {
           </button>
         </Section>
 
-        <Section role="input" title="地点リスト">
+        <Section role="input" title="地点リスト" dataTour="point-list">
           <ResizableScroll storageKey="editor.pointListHeight" defaultHeight={240}>
             <div style={{ marginBottom: '8px' }}>
               <strong style={{ color: MODE_COLORS.start }}>S 出発:</strong>{' '}
@@ -1626,6 +1629,7 @@ export function EditorPage() {
             マルチカラムの外（全幅）に置くことで、結果カードの高さ変化に伴う段組み再配置で
             ボタン位置が飛び跳ねるのを防ぐ。 */}
         <div
+          data-tour="calculate"
           style={{
             backgroundColor: '#fff7e6',
             border: '1px solid #f6c453',
@@ -1691,7 +1695,7 @@ export function EditorPage() {
         {/* 出力・履歴は別のマルチカラム領域に分離（入力側・計算ボタンと独立して段組み） */}
         <div className="editor-sections">
         {/* 結果セクションは常に存在させ、内容だけ切り替える（サンプル切替時のチラつき防止） */}
-        <Section role="output" title="結果">
+        <Section role="output" title="結果" dataTour="result">
           {result?.routes?.[0] ? (
             <div>
               {/* 主要 KPI（移動時間・距離・合計コスト） */}
@@ -1935,7 +1939,7 @@ export function EditorPage() {
           )}
         </Section>
 
-        <Section role="history" title="計算履歴">
+        <Section role="history" title="計算履歴" dataTour="history">
           {/* 履歴 / お気に入り タブ */}
           <div style={{ display: 'flex', gap: '4px', marginBottom: '8px' }}>
             {(

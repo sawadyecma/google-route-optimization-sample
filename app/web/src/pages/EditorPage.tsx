@@ -320,6 +320,43 @@ const costInfo = (key: string): { label: string; penalty: boolean } => {
   return { label: hit?.label ?? key, penalty: hit?.penalty ?? false };
 };
 
+// 小数も打てるコスト入力。制御＋数値だと "1." のような入力途中が毎キーストロークで
+// 丸められて小数点を打てないため、フォーカス中だけ生テキスト(draft)を保持して表示する。
+// フォーカスを外したら draft を捨て、確定値（prop の数値）へ表示を正規化する。
+// → prop が外部から変わるケース（履歴復元・クリア）にも素直に追従する。
+const CostNumberInput: React.FC<{
+  value: number | undefined; // 確定値（undefined = 空欄）
+  emptyValue: number | undefined; // 空欄にしたときに確定する値（ソフト=undefined / 車両コスト・ペナルティ=0）
+  onCommit: (v: number | undefined) => void;
+  // 0 を空欄として表示する（車両コスト＝0 は「コストなし」なので空欄＋プレースホルダにしたい）
+  zeroAsEmpty?: boolean;
+  placeholder?: string;
+  style?: React.CSSProperties;
+}> = ({ value, emptyValue, onCommit, zeroAsEmpty, placeholder, style }) => {
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <input
+      type="number"
+      min={0}
+      step="any"
+      inputMode="decimal"
+      placeholder={placeholder}
+      value={draft ?? (zeroAsEmpty && value === 0 ? '' : value ?? '')}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        if (e.target.value === '') {
+          onCommit(emptyValue);
+        } else {
+          const n = Number(e.target.value);
+          if (!Number.isNaN(n)) onCommit(n);
+        }
+      }}
+      onBlur={() => setDraft(null)}
+      style={style}
+    />
+  );
+};
+
 // ハード枠／ソフト枠それぞれの「クリア」ボタン共通スタイル（小さめのアウトラインボタン）
 const CLEAR_BTN_STYLE: React.CSSProperties = {
   border: '1px solid #d5d5d5',
@@ -428,17 +465,11 @@ const PointRow: React.FC<{
               style={{ fontSize: '11px', padding: '2px 4px' }}
             />
             <span>より前: </span>
-            <input
-              type="number"
-              min={0}
+            <CostNumberInput
+              value={point.costPerHourBeforeSoftStartTime}
+              emptyValue={undefined}
+              onCommit={(v) => onChange({ costPerHourBeforeSoftStartTime: v })}
               placeholder={String(DEFAULT_SOFT_COST)}
-              value={point.costPerHourBeforeSoftStartTime ?? ''}
-              onChange={(e) =>
-                onChange({
-                  costPerHourBeforeSoftStartTime:
-                    e.target.value === '' ? undefined : Number(e.target.value),
-                })
-              }
               style={{ fontSize: '11px', padding: '2px 4px', width: '48px' }}
             />
             <span>/h</span>
@@ -460,17 +491,11 @@ const PointRow: React.FC<{
               style={{ fontSize: '11px', padding: '2px 4px' }}
             />
             <span>より後: </span>
-            <input
-              type="number"
-              min={0}
+            <CostNumberInput
+              value={point.costPerHourAfterSoftEndTime}
+              emptyValue={undefined}
+              onCommit={(v) => onChange({ costPerHourAfterSoftEndTime: v })}
               placeholder={String(DEFAULT_SOFT_COST)}
-              value={point.costPerHourAfterSoftEndTime ?? ''}
-              onChange={(e) =>
-                onChange({
-                  costPerHourAfterSoftEndTime:
-                    e.target.value === '' ? undefined : Number(e.target.value),
-                })
-              }
               style={{ fontSize: '11px', padding: '2px 4px', width: '48px' }}
             />
             <span>/h</span>
@@ -521,13 +546,10 @@ const PointRow: React.FC<{
           {point.penaltyCost !== undefined && (
             <>
               <span>ペナルティ</span>
-              <input
-                type="number"
-                min={0}
+              <CostNumberInput
                 value={point.penaltyCost}
-                onChange={(e) =>
-                  onChange({ penaltyCost: e.target.value === '' ? 0 : Number(e.target.value) })
-                }
+                emptyValue={0}
+                onCommit={(v) => onChange({ penaltyCost: v })}
                 style={{ fontSize: '11px', padding: '2px 4px', width: '60px' }}
               />
             </>
@@ -801,8 +823,6 @@ export function EditorPage() {
   const [end, setEnd] = useState<LatLng | null>(null);
   const [vehicleCost, setVehicleCost] = useState<VehicleCost>(DEFAULT_VEHICLE_COST);
   const [costFavorites, setCostFavorites] = useState<VehicleCostFavorite[]>(loadVehicleCostFavorites);
-  // 非制御の車両コスト input を外部更新時に再マウントするためのシード（インクリメントで remount）
-  const [costSeed, setCostSeed] = useState(0);
   // null = グローバル時間枠を設定しない（リクエストから globalStart/EndTime を省く）
   const [globalWindow, setGlobalWindow] = useState<GlobalWindow | null>(DEFAULT_GLOBAL_WINDOW);
   const [result, setResult] = useState<OptimizeResponse | null>(null);
@@ -929,7 +949,6 @@ export function EditorPage() {
   };
   const applyCostFavorite = (cost: VehicleCost) => {
     setVehicleCost(cost);
-    setCostSeed((s) => s + 1); // 非制御 input を再マウントして適用値を反映
     setResult(null);
   };
   const removeCostFavorite = (id: string) =>
@@ -942,7 +961,6 @@ export function EditorPage() {
     setStart(snap.input.start);
     setEnd(snap.input.end);
     setVehicleCost(snap.input.vehicleCost);
-    setCostSeed((s) => s + 1); // 非制御 input を再マウントして復元値を反映
     // 旧スナップショット（globalWindow 無し）はデフォルト、明示的 null は未設定として復元
     setGlobalWindow(
       snap.input.globalWindow === undefined ? DEFAULT_GLOBAL_WINDOW : snap.input.globalWindow
@@ -1460,24 +1478,15 @@ export function EditorPage() {
                 <label title={hint} style={{ fontSize: '12px', color: '#444' }}>
                   {label}
                 </label>
-                <input
-                  // 非制御（defaultValue）にしているのは、制御＋数値だと "1." のような
-                  // 入力途中が毎キーストロークで数値へ丸められ、小数点・末尾0 を打てないため。
-                  // 外部から値を変える場合（お気に入り適用・デフォルト復帰・履歴復元）は
-                  // costSeed を更新して input を再マウントし、defaultValue を反映させる。
-                  key={`${key}-${costSeed}`}
-                  type="number"
-                  min={0}
-                  step="any"
-                  inputMode="decimal"
-                  defaultValue={vehicleCost[key] === 0 ? '' : vehicleCost[key]}
-                  placeholder="0"
-                  onChange={(e) => {
-                    const n = Number(e.target.value);
-                    const v = e.target.value === '' || Number.isNaN(n) ? 0 : n;
-                    setVehicleCost((c) => ({ ...c, [key]: v }));
+                <CostNumberInput
+                  value={vehicleCost[key]}
+                  emptyValue={0}
+                  zeroAsEmpty
+                  onCommit={(v) => {
+                    setVehicleCost((c) => ({ ...c, [key]: v ?? 0 }));
                     setResult(null);
                   }}
+                  placeholder="0"
                   style={{ fontSize: '12px', padding: '3px 4px', width: '70px', textAlign: 'right' }}
                 />
               </Fragment>
@@ -1556,7 +1565,6 @@ export function EditorPage() {
           <button
             onClick={() => {
               setVehicleCost(DEFAULT_VEHICLE_COST);
-              setCostSeed((s) => s + 1); // 非制御 input を再マウントして既定値を反映
               setResult(null);
             }}
             style={{

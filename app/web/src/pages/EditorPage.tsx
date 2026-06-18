@@ -160,7 +160,7 @@ const buildRequest = (
   start: LatLng,
   end: LatLng,
   vehicleCost: VehicleCost,
-  globalWindow: GlobalWindow
+  globalWindow: GlobalWindow | null
 ) => ({
   timeout: '10s',
   // ルート全体の道路に沿ったポリラインを routes[].routePolyline.points に格納させる
@@ -169,9 +169,13 @@ const buildRequest = (
   // （区間ごとの色分け・選択ハイライト等の用途で利用可能）
   populateTransitionPolylines: true,
   model: {
-    // 時間枠を有効に解釈させるためのグローバル範囲（固定日付上の hh:mm）
-    globalStartTime: toIsoTime(globalWindow.start),
-    globalEndTime: toIsoTime(globalWindow.end),
+    // グローバル時間枠（固定日付上の hh:mm）。未設定（null）なら送らず、API 既定の無制限範囲に任せる
+    ...(globalWindow
+      ? {
+          globalStartTime: toIsoTime(globalWindow.start),
+          globalEndTime: toIsoTime(globalWindow.end),
+        }
+      : {}),
     shipments: pickups.map((p, i) => {
       const pickupTw = buildTimeWindows(p);
       const deliveryTw = buildTimeWindows(deliveries[i]);
@@ -780,7 +784,8 @@ export function EditorPage() {
   const [start, setStart] = useState<LatLng | null>(null);
   const [end, setEnd] = useState<LatLng | null>(null);
   const [vehicleCost, setVehicleCost] = useState<VehicleCost>(DEFAULT_VEHICLE_COST);
-  const [globalWindow, setGlobalWindow] = useState<GlobalWindow>(DEFAULT_GLOBAL_WINDOW);
+  // null = グローバル時間枠を設定しない（リクエストから globalStart/EndTime を省く）
+  const [globalWindow, setGlobalWindow] = useState<GlobalWindow | null>(DEFAULT_GLOBAL_WINDOW);
   const [result, setResult] = useState<OptimizeResponse | null>(null);
 
   // 計算履歴（入力＋結果）。localStorage に永続化し、favorite で履歴/お気に入りを分ける。
@@ -899,7 +904,10 @@ export function EditorPage() {
     setStart(snap.input.start);
     setEnd(snap.input.end);
     setVehicleCost(snap.input.vehicleCost);
-    setGlobalWindow(snap.input.globalWindow ?? DEFAULT_GLOBAL_WINDOW);
+    // 旧スナップショット（globalWindow 無し）はデフォルト、明示的 null は未設定として復元
+    setGlobalWindow(
+      snap.input.globalWindow === undefined ? DEFAULT_GLOBAL_WINDOW : snap.input.globalWindow
+    );
     setResult(snap.result ?? null); // サンプル等、結果未計算なら地図はマーカーのみ
     setError(null);
   };
@@ -1324,44 +1332,67 @@ export function EditorPage() {
         </Section>
 
         <Section role="input" title="グローバル時間枠（最適化の全体範囲）">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#444' }}>
-            <span style={{ fontSize: '12px' }}>開始</span>
-            <input
-              type="time"
-              value={globalWindow.start}
-              onChange={(e) => {
-                setGlobalWindow((w) => ({ ...w, start: e.target.value || DEFAULT_GLOBAL_WINDOW.start }));
-                setResult(null);
-              }}
-              style={{ fontSize: '12px', padding: '3px 4px' }}
-            />
-            <span style={{ fontSize: '12px' }}>〜</span>
-            <span style={{ fontSize: '12px' }}>終了</span>
-            <input
-              type="time"
-              value={globalWindow.end}
-              onChange={(e) => {
-                setGlobalWindow((w) => ({ ...w, end: e.target.value || DEFAULT_GLOBAL_WINDOW.end }));
-                setResult(null);
-              }}
-              style={{ fontSize: '12px', padding: '3px 4px' }}
-            />
-          </div>
-          <p style={{ color: '#666', fontSize: '11px', marginTop: '6px', marginBottom: 0 }}>
-            全ルートがこの範囲内で完結します。各地点のハード／ソフト枠はこの範囲に収めてください。
-          </p>
-          {(globalWindow.start !== DEFAULT_GLOBAL_WINDOW.start ||
-            globalWindow.end !== DEFAULT_GLOBAL_WINDOW.end) && (
-            <button
-              onClick={() => {
-                setGlobalWindow(DEFAULT_GLOBAL_WINDOW);
-                setResult(null);
-              }}
-              title="デフォルト（00:00〜23:59）に戻す"
-              style={{ ...CLEAR_BTN_STYLE, marginTop: '6px' }}
-            >
-              デフォルトに戻す
-            </button>
+          {globalWindow ? (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#444' }}>
+                <span style={{ fontSize: '12px' }}>開始</span>
+                <input
+                  type="time"
+                  value={globalWindow.start}
+                  onChange={(e) => {
+                    setGlobalWindow((w) => ({
+                      ...(w ?? DEFAULT_GLOBAL_WINDOW),
+                      start: e.target.value || DEFAULT_GLOBAL_WINDOW.start,
+                    }));
+                    setResult(null);
+                  }}
+                  style={{ fontSize: '12px', padding: '3px 4px' }}
+                />
+                <span style={{ fontSize: '12px' }}>〜</span>
+                <span style={{ fontSize: '12px' }}>終了</span>
+                <input
+                  type="time"
+                  value={globalWindow.end}
+                  onChange={(e) => {
+                    setGlobalWindow((w) => ({
+                      ...(w ?? DEFAULT_GLOBAL_WINDOW),
+                      end: e.target.value || DEFAULT_GLOBAL_WINDOW.end,
+                    }));
+                    setResult(null);
+                  }}
+                  style={{ fontSize: '12px', padding: '3px 4px' }}
+                />
+              </div>
+              <p style={{ color: '#666', fontSize: '11px', marginTop: '6px', marginBottom: 0 }}>
+                全ルートがこの範囲内で完結します。各地点のハード／ソフト枠はこの範囲に収めてください。
+              </p>
+              <button
+                onClick={() => {
+                  setGlobalWindow(null);
+                  setResult(null);
+                }}
+                title="全体範囲の制約を外す（未設定にする）"
+                style={{ ...CLEAR_BTN_STYLE, marginTop: '6px' }}
+              >
+                クリア（設定しない）
+              </button>
+            </>
+          ) : (
+            <>
+              <p style={{ color: '#666', fontSize: '11px', margin: 0 }}>
+                未設定（全体範囲の制約なし）。各地点の時間枠だけで最適化します。
+              </p>
+              <button
+                onClick={() => {
+                  setGlobalWindow(DEFAULT_GLOBAL_WINDOW);
+                  setResult(null);
+                }}
+                title="グローバル時間枠を設定する"
+                style={{ ...CLEAR_BTN_STYLE, marginTop: '6px' }}
+              >
+                時間枠を設定
+              </button>
+            </>
           )}
         </Section>
 

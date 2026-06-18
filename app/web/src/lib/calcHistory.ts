@@ -16,8 +16,8 @@ export type CalcSnapshot = {
     start: LatLng;
     end: LatLng;
     vehicleCost: VehicleCost;
-    // 最適化の全体時間枠。旧スナップショットには無いので任意（復元時はデフォルトにフォールバック）。
-    globalWindow?: GlobalWindow;
+    // 最適化の全体時間枠。null = 明示的に未設定。undefined = 旧スナップショット（復元時はデフォルト）。
+    globalWindow?: GlobalWindow | null;
   };
   // 計算済み履歴は結果を持つ。サンプル（入力のみ）は未計算なので undefined。
   result?: OptimizeResponse;

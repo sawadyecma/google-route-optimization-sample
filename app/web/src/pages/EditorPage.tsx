@@ -9,6 +9,12 @@ import {
   persistSnapshots,
 } from '../lib/calcHistory';
 import { SAMPLE_SNAPSHOTS } from '../lib/sampleSnapshot';
+import {
+  type VehicleCostFavorite,
+  loadVehicleCostFavorites,
+  persistVehicleCostFavorites,
+  sameVehicleCost,
+} from '../lib/vehicleCostFavorites';
 import { color, radius, shadow, space } from '../theme';
 // Polyline は @react-google-maps/api 側のクリーンアップが信頼できないため
 // google.maps.Polyline を直接 ref で管理する
@@ -154,13 +160,23 @@ const DEFAULT_VEHICLE_COST: VehicleCost = {
   fixedCost: 0,
 };
 
+// 車両コストを、お気に入りチップ用の短いラベルに（0 のフィールドは省く）
+const vehicleCostLabel = (c: VehicleCost): string => {
+  const parts: string[] = [];
+  if (c.costPerHour) parts.push(`時${c.costPerHour}`);
+  if (c.costPerTraveledHour) parts.push(`移${c.costPerTraveledHour}`);
+  if (c.costPerKilometer) parts.push(`距${c.costPerKilometer}`);
+  if (c.fixedCost) parts.push(`固${c.fixedCost}`);
+  return parts.length ? parts.join(' / ') : 'すべて0';
+};
+
 const buildRequest = (
   pickups: Point[],
   deliveries: Point[],
   start: LatLng,
   end: LatLng,
   vehicleCost: VehicleCost,
-  globalWindow: GlobalWindow
+  globalWindow: GlobalWindow | null
 ) => ({
   timeout: '10s',
   // ルート全体の道路に沿ったポリラインを routes[].routePolyline.points に格納させる
@@ -169,9 +185,13 @@ const buildRequest = (
   // （区間ごとの色分け・選択ハイライト等の用途で利用可能）
   populateTransitionPolylines: true,
   model: {
-    // 時間枠を有効に解釈させるためのグローバル範囲（固定日付上の hh:mm）
-    globalStartTime: toIsoTime(globalWindow.start),
-    globalEndTime: toIsoTime(globalWindow.end),
+    // グローバル時間枠（固定日付上の hh:mm）。未設定（null）なら送らず、API 既定の無制限範囲に任せる
+    ...(globalWindow
+      ? {
+          globalStartTime: toIsoTime(globalWindow.start),
+          globalEndTime: toIsoTime(globalWindow.end),
+        }
+      : {}),
     shipments: pickups.map((p, i) => {
       const pickupTw = buildTimeWindows(p);
       const deliveryTw = buildTimeWindows(deliveries[i]);
@@ -300,6 +320,43 @@ const costInfo = (key: string): { label: string; penalty: boolean } => {
   return { label: hit?.label ?? key, penalty: hit?.penalty ?? false };
 };
 
+// 小数も打てるコスト入力。制御＋数値だと "1." のような入力途中が毎キーストロークで
+// 丸められて小数点を打てないため、フォーカス中だけ生テキスト(draft)を保持して表示する。
+// フォーカスを外したら draft を捨て、確定値（prop の数値）へ表示を正規化する。
+// → prop が外部から変わるケース（履歴復元・クリア）にも素直に追従する。
+const CostNumberInput: React.FC<{
+  value: number | undefined; // 確定値（undefined = 空欄）
+  emptyValue: number | undefined; // 空欄にしたときに確定する値（ソフト=undefined / 車両コスト・ペナルティ=0）
+  onCommit: (v: number | undefined) => void;
+  // 0 を空欄として表示する（車両コスト＝0 は「コストなし」なので空欄＋プレースホルダにしたい）
+  zeroAsEmpty?: boolean;
+  placeholder?: string;
+  style?: React.CSSProperties;
+}> = ({ value, emptyValue, onCommit, zeroAsEmpty, placeholder, style }) => {
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <input
+      type="number"
+      min={0}
+      step="any"
+      inputMode="decimal"
+      placeholder={placeholder}
+      value={draft ?? (zeroAsEmpty && value === 0 ? '' : value ?? '')}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        if (e.target.value === '') {
+          onCommit(emptyValue);
+        } else {
+          const n = Number(e.target.value);
+          if (!Number.isNaN(n)) onCommit(n);
+        }
+      }}
+      onBlur={() => setDraft(null)}
+      style={style}
+    />
+  );
+};
+
 // ハード枠／ソフト枠それぞれの「クリア」ボタン共通スタイル（小さめのアウトラインボタン）
 const CLEAR_BTN_STYLE: React.CSSProperties = {
   border: '1px solid #d5d5d5',
@@ -408,17 +465,11 @@ const PointRow: React.FC<{
               style={{ fontSize: '11px', padding: '2px 4px' }}
             />
             <span>より前: </span>
-            <input
-              type="number"
-              min={0}
+            <CostNumberInput
+              value={point.costPerHourBeforeSoftStartTime}
+              emptyValue={undefined}
+              onCommit={(v) => onChange({ costPerHourBeforeSoftStartTime: v })}
               placeholder={String(DEFAULT_SOFT_COST)}
-              value={point.costPerHourBeforeSoftStartTime ?? ''}
-              onChange={(e) =>
-                onChange({
-                  costPerHourBeforeSoftStartTime:
-                    e.target.value === '' ? undefined : Number(e.target.value),
-                })
-              }
               style={{ fontSize: '11px', padding: '2px 4px', width: '48px' }}
             />
             <span>/h</span>
@@ -440,17 +491,11 @@ const PointRow: React.FC<{
               style={{ fontSize: '11px', padding: '2px 4px' }}
             />
             <span>より後: </span>
-            <input
-              type="number"
-              min={0}
+            <CostNumberInput
+              value={point.costPerHourAfterSoftEndTime}
+              emptyValue={undefined}
+              onCommit={(v) => onChange({ costPerHourAfterSoftEndTime: v })}
               placeholder={String(DEFAULT_SOFT_COST)}
-              value={point.costPerHourAfterSoftEndTime ?? ''}
-              onChange={(e) =>
-                onChange({
-                  costPerHourAfterSoftEndTime:
-                    e.target.value === '' ? undefined : Number(e.target.value),
-                })
-              }
               style={{ fontSize: '11px', padding: '2px 4px', width: '48px' }}
             />
             <span>/h</span>
@@ -501,13 +546,10 @@ const PointRow: React.FC<{
           {point.penaltyCost !== undefined && (
             <>
               <span>ペナルティ</span>
-              <input
-                type="number"
-                min={0}
+              <CostNumberInput
                 value={point.penaltyCost}
-                onChange={(e) =>
-                  onChange({ penaltyCost: e.target.value === '' ? 0 : Number(e.target.value) })
-                }
+                emptyValue={0}
+                onCommit={(v) => onChange({ penaltyCost: v })}
                 style={{ fontSize: '11px', padding: '2px 4px', width: '60px' }}
               />
             </>
@@ -627,6 +669,7 @@ const ResizableScroll: React.FC<{
     return Number.isFinite(saved) && saved > 0 ? saved : defaultHeight;
   });
   const [dragging, setDragging] = useState(false);
+  const [hovering, setHovering] = useState(false);
   const startRef = useRef<{ y: number; h: number } | null>(null);
 
   useEffect(() => {
@@ -667,6 +710,8 @@ const ResizableScroll: React.FC<{
           startRef.current = { y: e.clientY, h: height };
           setDragging(true);
         }}
+        onMouseEnter={() => setHovering(true)}
+        onMouseLeave={() => setHovering(false)}
         title="ドラッグで高さを調整"
         style={{
           height: '12px',
@@ -675,16 +720,27 @@ const ResizableScroll: React.FC<{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
+          borderRadius: radius.sm,
+          backgroundColor: dragging || hovering ? '#f0f1f3' : 'transparent',
+          transition: 'background-color 0.15s',
         }}
       >
-        <span
-          style={{
-            width: '28px',
-            height: '3px',
-            borderRadius: radius.pill,
-            backgroundColor: dragging ? color.purple : color.borderStrong,
-          }}
-        />
+        {/* 横方向のドットグリップ（5 列 × 2 行）。列リサイザと同じ見た目で、
+            ホバー／ドラッグ中は色を濃くする */}
+        <span style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 3px)', gap: '2px 4px' }}>
+          {Array.from({ length: 10 }).map((_, i) => (
+            <span
+              key={i}
+              style={{
+                width: '3px',
+                height: '3px',
+                borderRadius: radius.pill,
+                backgroundColor: dragging || hovering ? '#9aa0a6' : '#b0b4ba',
+                transition: 'background-color 0.15s',
+              }}
+            />
+          ))}
+        </span>
       </div>
     </div>
   );
@@ -766,7 +822,9 @@ export function EditorPage() {
   const [start, setStart] = useState<LatLng | null>(null);
   const [end, setEnd] = useState<LatLng | null>(null);
   const [vehicleCost, setVehicleCost] = useState<VehicleCost>(DEFAULT_VEHICLE_COST);
-  const [globalWindow, setGlobalWindow] = useState<GlobalWindow>(DEFAULT_GLOBAL_WINDOW);
+  const [costFavorites, setCostFavorites] = useState<VehicleCostFavorite[]>(loadVehicleCostFavorites);
+  // null = グローバル時間枠を設定しない（リクエストから globalStart/EndTime を省く）
+  const [globalWindow, setGlobalWindow] = useState<GlobalWindow | null>(DEFAULT_GLOBAL_WINDOW);
   const [result, setResult] = useState<OptimizeResponse | null>(null);
 
   // 計算履歴（入力＋結果）。localStorage に永続化し、favorite で履歴/お気に入りを分ける。
@@ -778,6 +836,9 @@ export function EditorPage() {
   useEffect(() => {
     persistSnapshots(snapshots);
   }, [snapshots]);
+  useEffect(() => {
+    persistVehicleCostFavorites(costFavorites);
+  }, [costFavorites]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentLocation, setCurrentLocation] = useState<LatLng | null>(null);
@@ -878,6 +939,21 @@ export function EditorPage() {
     setError(null);
   };
 
+  // 現在の車両コストをお気に入りに登録（同値が既にあれば追加しない）
+  const saveCostFavorite = () => {
+    setCostFavorites((prev) =>
+      prev.some((f) => sameVehicleCost(f.cost, vehicleCost))
+        ? prev
+        : [{ id: makeId(), cost: { ...vehicleCost } }, ...prev]
+    );
+  };
+  const applyCostFavorite = (cost: VehicleCost) => {
+    setVehicleCost(cost);
+    setResult(null);
+  };
+  const removeCostFavorite = (id: string) =>
+    setCostFavorites((prev) => prev.filter((f) => f.id !== id));
+
   // 履歴のスナップショットをエディタに復元（入力一式 + 結果を反映）
   const restoreSnapshot = (snap: CalcSnapshot) => {
     setPickups(snap.input.pickups);
@@ -885,7 +961,10 @@ export function EditorPage() {
     setStart(snap.input.start);
     setEnd(snap.input.end);
     setVehicleCost(snap.input.vehicleCost);
-    setGlobalWindow(snap.input.globalWindow ?? DEFAULT_GLOBAL_WINDOW);
+    // 旧スナップショット（globalWindow 無し）はデフォルト、明示的 null は未設定として復元
+    setGlobalWindow(
+      snap.input.globalWindow === undefined ? DEFAULT_GLOBAL_WINDOW : snap.input.globalWindow
+    );
     setResult(snap.result ?? null); // サンプル等、結果未計算なら地図はマーカーのみ
     setError(null);
   };
@@ -1211,21 +1290,40 @@ export function EditorPage() {
         )}
       </div>
 
-      {/* ドラッグでマップ／サイドバーの幅を調整する仕切り */}
+      {/* ドラッグでマップ／サイドバーの幅を調整する仕切り。
+          掴めることが分かるよう、中央に常時グリップを表示し、ホバーで色を強調する。 */}
+      <style>{`
+        /* 色はクラス側に持たせる（インラインだと :hover で上書きできないため） */
+        .col-resizer { background-color: transparent; transition: background-color 0.15s; }
+        .col-resizer:hover,
+        .col-resizer.dragging { background-color: #f0f1f3; }
+        .col-resizer-dot { width: 3px; height: 3px; border-radius: 999px; background-color: #b0b4ba; transition: background-color 0.15s; }
+        .col-resizer:hover .col-resizer-dot,
+        .col-resizer.dragging .col-resizer-dot { background-color: #9aa0a6; }
+      `}</style>
       <div
         onMouseDown={(e) => {
           e.preventDefault();
           setResizing(true);
         }}
-        title="ドラッグで幅を調整"
+        title="ドラッグでマップとサイドバーの幅を調整"
+        className={`col-resizer${resizing ? ' dragging' : ''}`}
         style={{
-          width: '6px',
+          width: '10px',
           flexShrink: 0,
           cursor: 'col-resize',
-          backgroundColor: resizing ? '#4285F4' : '#ddd',
-          transition: resizing ? 'none' : 'background-color 0.15s',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
         }}
-      />
+      >
+        {/* ドットグリップ（2 列 × 5 行）でドラッグ可能を示す。帯は控えめ・ハンドルは目立たせる */}
+        <span style={{ display: 'grid', gridTemplateColumns: '3px 3px', gap: '4px 2px' }}>
+          {Array.from({ length: 10 }).map((_, i) => (
+            <span key={i} className="col-resizer-dot" />
+          ))}
+        </span>
+      </div>
 
       <div
         style={{
@@ -1291,44 +1389,67 @@ export function EditorPage() {
         </Section>
 
         <Section role="input" title="グローバル時間枠（最適化の全体範囲）">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#444' }}>
-            <span style={{ fontSize: '12px' }}>開始</span>
-            <input
-              type="time"
-              value={globalWindow.start}
-              onChange={(e) => {
-                setGlobalWindow((w) => ({ ...w, start: e.target.value || DEFAULT_GLOBAL_WINDOW.start }));
-                setResult(null);
-              }}
-              style={{ fontSize: '12px', padding: '3px 4px' }}
-            />
-            <span style={{ fontSize: '12px' }}>〜</span>
-            <span style={{ fontSize: '12px' }}>終了</span>
-            <input
-              type="time"
-              value={globalWindow.end}
-              onChange={(e) => {
-                setGlobalWindow((w) => ({ ...w, end: e.target.value || DEFAULT_GLOBAL_WINDOW.end }));
-                setResult(null);
-              }}
-              style={{ fontSize: '12px', padding: '3px 4px' }}
-            />
-          </div>
-          <p style={{ color: '#666', fontSize: '11px', marginTop: '6px', marginBottom: 0 }}>
-            全ルートがこの範囲内で完結します。各地点のハード／ソフト枠はこの範囲に収めてください。
-          </p>
-          {(globalWindow.start !== DEFAULT_GLOBAL_WINDOW.start ||
-            globalWindow.end !== DEFAULT_GLOBAL_WINDOW.end) && (
-            <button
-              onClick={() => {
-                setGlobalWindow(DEFAULT_GLOBAL_WINDOW);
-                setResult(null);
-              }}
-              title="デフォルト（00:00〜23:59）に戻す"
-              style={{ ...CLEAR_BTN_STYLE, marginTop: '6px' }}
-            >
-              デフォルトに戻す
-            </button>
+          {globalWindow ? (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#444' }}>
+                <span style={{ fontSize: '12px' }}>開始</span>
+                <input
+                  type="time"
+                  value={globalWindow.start}
+                  onChange={(e) => {
+                    setGlobalWindow((w) => ({
+                      ...(w ?? DEFAULT_GLOBAL_WINDOW),
+                      start: e.target.value || DEFAULT_GLOBAL_WINDOW.start,
+                    }));
+                    setResult(null);
+                  }}
+                  style={{ fontSize: '12px', padding: '3px 4px' }}
+                />
+                <span style={{ fontSize: '12px' }}>〜</span>
+                <span style={{ fontSize: '12px' }}>終了</span>
+                <input
+                  type="time"
+                  value={globalWindow.end}
+                  onChange={(e) => {
+                    setGlobalWindow((w) => ({
+                      ...(w ?? DEFAULT_GLOBAL_WINDOW),
+                      end: e.target.value || DEFAULT_GLOBAL_WINDOW.end,
+                    }));
+                    setResult(null);
+                  }}
+                  style={{ fontSize: '12px', padding: '3px 4px' }}
+                />
+              </div>
+              <p style={{ color: '#666', fontSize: '11px', marginTop: '6px', marginBottom: 0 }}>
+                全ルートがこの範囲内で完結します。各地点のハード／ソフト枠はこの範囲に収めてください。
+              </p>
+              <button
+                onClick={() => {
+                  setGlobalWindow(null);
+                  setResult(null);
+                }}
+                title="全体範囲の制約を外す（未設定にする）"
+                style={{ ...CLEAR_BTN_STYLE, marginTop: '6px' }}
+              >
+                クリア（設定しない）
+              </button>
+            </>
+          ) : (
+            <>
+              <p style={{ color: '#666', fontSize: '11px', margin: 0 }}>
+                未設定（全体範囲の制約なし）。各地点の時間枠だけで最適化します。
+              </p>
+              <button
+                onClick={() => {
+                  setGlobalWindow(DEFAULT_GLOBAL_WINDOW);
+                  setResult(null);
+                }}
+                title="グローバル時間枠を設定する"
+                style={{ ...CLEAR_BTN_STYLE, marginTop: '6px' }}
+              >
+                時間枠を設定
+              </button>
+            </>
           )}
         </Section>
 
@@ -1357,20 +1478,15 @@ export function EditorPage() {
                 <label title={hint} style={{ fontSize: '12px', color: '#444' }}>
                   {label}
                 </label>
-                <input
-                  type="number"
-                  min={0}
-                  step={1}
-                  // 0 は「コストなし」を意味し、リクエストにも含めない（下の補足参照）。
-                  // 0 を空表示にしておかないと、値型の制御 input がキー入力のたびに
-                  // "0" を差し戻し、フィールドを消去・編集できず「キーボードで打てない」状態になる。
-                  value={vehicleCost[key] === 0 ? '' : vehicleCost[key]}
-                  placeholder="0"
-                  onChange={(e) => {
-                    const v = e.target.value === '' ? 0 : Number(e.target.value);
-                    setVehicleCost((c) => ({ ...c, [key]: v }));
+                <CostNumberInput
+                  value={vehicleCost[key]}
+                  emptyValue={0}
+                  zeroAsEmpty
+                  onCommit={(v) => {
+                    setVehicleCost((c) => ({ ...c, [key]: v ?? 0 }));
                     setResult(null);
                   }}
+                  placeholder="0"
                   style={{ fontSize: '12px', padding: '3px 4px', width: '70px', textAlign: 'right' }}
                 />
               </Fragment>
@@ -1379,13 +1495,80 @@ export function EditorPage() {
           <p style={{ color: '#666', fontSize: '11px', marginTop: '6px' }}>
             ソフト制約の違反コストとの<strong>相対値</strong>で挙動が決まります。0 のコストはリクエストに含めません。
           </p>
+
+          {/* お気に入り（車両コストのプリセット）。localStorage に保存し、ワンタップで適用できる。 */}
+          <div style={{ marginTop: '8px', borderTop: '1px solid #eee', paddingTop: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ fontSize: '11px', color: '#666' }}>お気に入り</span>
+              <button
+                onClick={saveCostFavorite}
+                title="現在の車両コストをお気に入りに登録"
+                style={CLEAR_BTN_STYLE}
+              >
+                ★ 現在の値を登録
+              </button>
+            </div>
+            {costFavorites.length > 0 ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
+                {costFavorites.map((f) => (
+                  <span
+                    key={f.id}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      border: '1px solid #d5d5d5',
+                      borderRadius: '999px',
+                      background: '#fff',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <button
+                      onClick={() => applyCostFavorite(f.cost)}
+                      title="この値を適用"
+                      style={{
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        color: '#555',
+                        fontSize: '10px',
+                        padding: '2px 7px',
+                      }}
+                    >
+                      {vehicleCostLabel(f.cost)}
+                    </button>
+                    <button
+                      onClick={() => removeCostFavorite(f.id)}
+                      title="このお気に入りを削除"
+                      style={{
+                        border: 'none',
+                        borderLeft: '1px solid #eee',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        color: '#bbb',
+                        fontSize: '11px',
+                        lineHeight: 1,
+                        padding: '2px 5px',
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p style={{ color: '#999', fontSize: '10px', margin: '6px 0 0' }}>
+                登録なし。現在の値を登録すると、ここからワンタップで呼び出せます。
+              </p>
+            )}
+          </div>
+
           <button
             onClick={() => {
               setVehicleCost(DEFAULT_VEHICLE_COST);
               setResult(null);
             }}
             style={{
-              marginTop: '4px',
+              marginTop: '8px',
               border: 'none',
               background: 'transparent',
               cursor: 'pointer',

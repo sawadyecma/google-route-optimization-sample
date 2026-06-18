@@ -86,19 +86,17 @@ curl -X POST http://localhost:3000/optimize \
 
 ### Web ブラウザで結果を可視化
 
-まず環境変数を設定します：
+まず環境変数のテンプレートを作成します：
 
 ```bash
 make env-setup
 ```
 
-`.env.local` ファイルを編集して Google Maps API キーを設定します：
+`app/web/.env.local` を編集し、Google Maps API キーを設定します（必要に応じて `VITE_API_BASE_URL` も）：
 
-```bash
-cd app/web
-cat > .env.local << 'EOF'
+```
 VITE_GOOGLE_MAPS_API_KEY=your-google-maps-api-key-here
-EOF
+VITE_API_BASE_URL=http://localhost:3000
 ```
 
 その後、開発サーバーを起動：
@@ -110,6 +108,28 @@ npm run --workspace=web dev
 ```
 
 ブラウザで `http://localhost:5173` にアクセスしてルート最適化の結果を Google Maps 上で確認できます。
+
+## 環境変数の管理
+
+各ワークスペースは独立した env ファイルを持ちます（いずれも git 管理外）。
+`make env-setup` で各 `.env.example` から雛形を作成できます。
+
+| ワークスペース | ファイル | 変数 | 用途 |
+|---|---|---|---|
+| cmd | `app/cmd/.env` | `GOOGLE_PROJECT_ID` | 呼び出す GCP プロジェクト |
+| server | `app/server/.env` | `GOOGLE_PROJECT_ID` | 呼び出す GCP プロジェクト |
+| server | `app/server/.env` | `PORT` | ローカルの listen ポート（既定 3000） |
+| server | `app/server/.env` | `GOOGLE_CREDENTIALS_BASE64` | （任意）デプロイ時のサービスアカウント鍵。ローカルは未設定で ADC を使用 |
+| web | `app/web/.env.local` | `VITE_GOOGLE_MAPS_API_KEY` | 地図表示用の Maps API キー |
+| web | `app/web/.env.local` | `VITE_API_BASE_URL` | バックエンド API の URL（末尾スラッシュ無し） |
+
+- **ローカル認証**: cmd / server は `gcloud auth application-default login` の ADC を使うため、
+  鍵ファイル（`GOOGLE_APPLICATION_CREDENTIALS`）は不要です。
+- **Vite の制約**: web ではビルド時に `VITE_` 接頭辞の変数のみがバンドルへ埋め込まれます。
+  値を変えたら再ビルドが必要で、`GOOGLE_PROJECT_ID` 等のサーバー側変数は web では使われません。
+- **デプロイ時**: Vercel では環境変数はダッシュボードで設定します（`.env` ファイルは使いません）。
+  サービスアカウント鍵・Basic 認証など本番固有の変数を含む全手順は
+  [docs/vercel-deploy.md](docs/vercel-deploy.md) を参照してください。
 
 ## ディレクトリ構造
 

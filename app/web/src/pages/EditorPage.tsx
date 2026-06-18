@@ -627,6 +627,7 @@ const ResizableScroll: React.FC<{
     return Number.isFinite(saved) && saved > 0 ? saved : defaultHeight;
   });
   const [dragging, setDragging] = useState(false);
+  const [hovering, setHovering] = useState(false);
   const startRef = useRef<{ y: number; h: number } | null>(null);
 
   useEffect(() => {
@@ -667,6 +668,8 @@ const ResizableScroll: React.FC<{
           startRef.current = { y: e.clientY, h: height };
           setDragging(true);
         }}
+        onMouseEnter={() => setHovering(true)}
+        onMouseLeave={() => setHovering(false)}
         title="ドラッグで高さを調整"
         style={{
           height: '12px',
@@ -675,16 +678,27 @@ const ResizableScroll: React.FC<{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
+          borderRadius: radius.sm,
+          backgroundColor: dragging || hovering ? '#f0f1f3' : 'transparent',
+          transition: 'background-color 0.15s',
         }}
       >
-        <span
-          style={{
-            width: '28px',
-            height: '3px',
-            borderRadius: radius.pill,
-            backgroundColor: dragging ? color.purple : color.borderStrong,
-          }}
-        />
+        {/* 横方向のドットグリップ（5 列 × 2 行）。列リサイザと同じ見た目で、
+            ホバー／ドラッグ中は色を濃くする */}
+        <span style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 3px)', gap: '2px 4px' }}>
+          {Array.from({ length: 10 }).map((_, i) => (
+            <span
+              key={i}
+              style={{
+                width: '3px',
+                height: '3px',
+                borderRadius: radius.pill,
+                backgroundColor: dragging || hovering ? '#9aa0a6' : '#b0b4ba',
+                transition: 'background-color 0.15s',
+              }}
+            />
+          ))}
+        </span>
       </div>
     </div>
   );
@@ -1211,21 +1225,40 @@ export function EditorPage() {
         )}
       </div>
 
-      {/* ドラッグでマップ／サイドバーの幅を調整する仕切り */}
+      {/* ドラッグでマップ／サイドバーの幅を調整する仕切り。
+          掴めることが分かるよう、中央に常時グリップを表示し、ホバーで色を強調する。 */}
+      <style>{`
+        /* 色はクラス側に持たせる（インラインだと :hover で上書きできないため） */
+        .col-resizer { background-color: transparent; transition: background-color 0.15s; }
+        .col-resizer:hover,
+        .col-resizer.dragging { background-color: #f0f1f3; }
+        .col-resizer-dot { width: 3px; height: 3px; border-radius: 999px; background-color: #b0b4ba; transition: background-color 0.15s; }
+        .col-resizer:hover .col-resizer-dot,
+        .col-resizer.dragging .col-resizer-dot { background-color: #9aa0a6; }
+      `}</style>
       <div
         onMouseDown={(e) => {
           e.preventDefault();
           setResizing(true);
         }}
-        title="ドラッグで幅を調整"
+        title="ドラッグでマップとサイドバーの幅を調整"
+        className={`col-resizer${resizing ? ' dragging' : ''}`}
         style={{
-          width: '6px',
+          width: '10px',
           flexShrink: 0,
           cursor: 'col-resize',
-          backgroundColor: resizing ? '#4285F4' : '#ddd',
-          transition: resizing ? 'none' : 'background-color 0.15s',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
         }}
-      />
+      >
+        {/* ドットグリップ（2 列 × 5 行）でドラッグ可能を示す。帯は控えめ・ハンドルは目立たせる */}
+        <span style={{ display: 'grid', gridTemplateColumns: '3px 3px', gap: '4px 2px' }}>
+          {Array.from({ length: 10 }).map((_, i) => (
+            <span key={i} className="col-resizer-dot" />
+          ))}
+        </span>
+      </div>
 
       <div
         style={{

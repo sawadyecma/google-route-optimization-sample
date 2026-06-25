@@ -2,7 +2,14 @@
 // 履歴とお気に入りは 1 つのリストで管理し、favorite フラグで区別する。
 // お気に入りは件数上限の対象外（履歴が溢れても消えない）。
 
-import type { LatLng, Point, VehicleCost, GlobalWindow, OptimizeResponse } from '../pages/EditorPage';
+import type {
+  LatLng,
+  Point,
+  VehicleCost,
+  GlobalWindow,
+  BreakItem,
+  OptimizeResponse,
+} from '../pages/EditorPage';
 
 // 1 回の計算のスナップショット（入力一式 + 結果）
 export type CalcSnapshot = {
@@ -18,6 +25,8 @@ export type CalcSnapshot = {
     vehicleCost: VehicleCost;
     // 最適化の全体時間枠。null = 明示的に未設定。undefined = 旧スナップショット（復元時はデフォルト）。
     globalWindow?: GlobalWindow | null;
+    // 休憩（ブレイク）リスト。undefined = 旧スナップショット（復元時は休憩なし）。
+    breaks?: BreakItem[];
   };
   // 計算済み履歴は結果を持つ。サンプル（入力のみ）は未計算なので undefined。
   result?: OptimizeResponse;

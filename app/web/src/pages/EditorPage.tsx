@@ -54,6 +54,25 @@ const toIsoTime = (hhmm: string) => `${FIXED_DATE}T${hhmm}:00Z`;
 export type GlobalWindow = { start: string; end: string };
 const DEFAULT_GLOBAL_WINDOW: GlobalWindow = { start: '00:00', end: '23:59' };
 
+// 休憩（ブレイク）。車両は earliestStart〜latestStart の間に開始し、最低 minMinutes 分の休憩を取る。
+// （API の vehicle.breakRule.breakRequests に対応。複数設定可＝昼休憩＋小休憩など）
+export type BreakItem = {
+  earliestStart: string; // 休憩を開始してよい最早時刻（hh:mm）
+  latestStart: string; // 休憩を開始してよい最遅時刻（hh:mm）
+  minMinutes: number; // 休憩の最小所要時間（分）
+};
+const DEFAULT_BREAK: BreakItem = { earliestStart: '12:00', latestStart: '13:00', minMinutes: 60 };
+
+// 休憩リストを API の breakRule に変換。空なら undefined（＝休憩なし）。
+const buildBreakRule = (breaks: BreakItem[]) => {
+  const breakRequests = breaks.map((b) => ({
+    earliestStartTime: toIsoTime(b.earliestStart),
+    latestStartTime: toIsoTime(b.latestStart),
+    minDuration: `${Math.max(0, Math.round(b.minMinutes * 60))}s`,
+  }));
+  return breakRequests.length > 0 ? { breakRequests } : undefined;
+};
+
 // ハード／ソフト両方をまとめて 1 つの timeWindow に詰める。
 // いずれも未設定なら undefined（= 時間制約なし）。
 const buildTimeWindows = (point: Point) => {
@@ -176,7 +195,8 @@ const buildRequest = (
   start: LatLng,
   end: LatLng,
   vehicleCost: VehicleCost,
-  globalWindow: GlobalWindow | null
+  globalWindow: GlobalWindow | null,
+  breaks: BreakItem[]
 ) => ({
   timeout: '10s',
   // ルート全体の道路に沿ったポリラインを routes[].routePolyline.points に格納させる
@@ -226,6 +246,8 @@ const buildRequest = (
           ? { costPerKilometer: vehicleCost.costPerKilometer }
           : {}),
         ...(vehicleCost.fixedCost ? { fixedCost: vehicleCost.fixedCost } : {}),
+        // 休憩（ブレイク）。空なら送らない。
+        ...(buildBreakRule(breaks) ? { breakRule: buildBreakRule(breaks) } : {}),
       },
     ],
   },
@@ -829,6 +851,8 @@ export function EditorPage() {
   const [costFavorites, setCostFavorites] = useState<VehicleCostFavorite[]>(loadVehicleCostFavorites);
   // null = グローバル時間枠を設定しない（リクエストから globalStart/EndTime を省く）
   const [globalWindow, setGlobalWindow] = useState<GlobalWindow | null>(DEFAULT_GLOBAL_WINDOW);
+  // 休憩（ブレイク）リスト。空 = 休憩なし。
+  const [breaks, setBreaks] = useState<BreakItem[]>([]);
   const [result, setResult] = useState<OptimizeResponse | null>(null);
 
   // 計算履歴（入力＋結果）。localStorage に永続化し、favorite で履歴/お気に入りを分ける。
@@ -969,6 +993,8 @@ export function EditorPage() {
     setGlobalWindow(
       snap.input.globalWindow === undefined ? DEFAULT_GLOBAL_WINDOW : snap.input.globalWindow
     );
+    // 旧スナップショット（breaks 無し）は休憩なしとして復元
+    setBreaks(snap.input.breaks ?? []);
     setResult(snap.result ?? null); // サンプル等、結果未計算なら地図はマーカーのみ
     setError(null);
   };
@@ -1017,7 +1043,7 @@ export function EditorPage() {
       setResult(null);
     });
     try {
-      const body = buildRequest(pickups, deliveries, start, end, vehicleCost, globalWindow);
+      const body = buildRequest(pickups, deliveries, start, end, vehicleCost, globalWindow, breaks);
       const res = await fetch(`${apiBase}/optimize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1034,7 +1060,7 @@ export function EditorPage() {
         id: makeId(),
         createdAt: Date.now(),
         favorite: false,
-        input: { pickups, deliveries, start, end, vehicleCost, globalWindow },
+        input: { pickups, deliveries, start, end, vehicleCost, globalWindow, breaks },
         result: data,
       };
       setSnapshots((prev) => addSnapshot(prev, snap));
@@ -1456,6 +1482,103 @@ export function EditorPage() {
               </button>
             </>
           )}
+        </Section>
+
+        <Section role="input" title="休憩（ブレイク）" dataTour="breaks">
+          {breaks.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {breaks.map((b, i) => (
+                <div
+                  key={i}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: '4px 6px',
+                    color: '#444',
+                    fontSize: '12px',
+                  }}
+                >
+                  <span style={{ color: '#888', minWidth: '14px' }}>{i + 1}.</span>
+                  <span>開始</span>
+                  <input
+                    type="time"
+                    value={b.earliestStart}
+                    onChange={(e) => {
+                      const v = e.target.value || DEFAULT_BREAK.earliestStart;
+                      setBreaks((arr) =>
+                        arr.map((x, j) => (j === i ? { ...x, earliestStart: v } : x))
+                      );
+                      setResult(null);
+                    }}
+                    style={{ fontSize: '12px', padding: '3px 4px' }}
+                  />
+                  <span>〜</span>
+                  <input
+                    type="time"
+                    value={b.latestStart}
+                    onChange={(e) => {
+                      const v = e.target.value || DEFAULT_BREAK.latestStart;
+                      setBreaks((arr) =>
+                        arr.map((x, j) => (j === i ? { ...x, latestStart: v } : x))
+                      );
+                      setResult(null);
+                    }}
+                    style={{ fontSize: '12px', padding: '3px 4px' }}
+                  />
+                  <span>の間に</span>
+                  <CostNumberInput
+                    value={b.minMinutes}
+                    emptyValue={0}
+                    onCommit={(v) => {
+                      setBreaks((arr) =>
+                        arr.map((x, j) => (j === i ? { ...x, minMinutes: v ?? 0 } : x))
+                      );
+                      setResult(null);
+                    }}
+                    placeholder="60"
+                    style={{ fontSize: '12px', padding: '3px 4px', width: '52px', textAlign: 'right' }}
+                  />
+                  <span>分</span>
+                  <button
+                    onClick={() => {
+                      setBreaks((arr) => arr.filter((_, j) => j !== i));
+                      setResult(null);
+                    }}
+                    title="この休憩を削除"
+                    style={{
+                      border: 'none',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      color: '#bbb',
+                      fontSize: '14px',
+                      lineHeight: 1,
+                      padding: '0 4px',
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p style={{ color: '#666', fontSize: '11px', margin: 0 }}>
+              未設定（休憩なし）。車両は休憩を取らずに全ルートを回ります。
+            </p>
+          )}
+          <p style={{ color: '#666', fontSize: '11px', marginTop: '6px', marginBottom: 0 }}>
+            車両は指定した「開始可能な時間帯」の間に休憩を開始し、最低でも指定分の休憩を取ります。
+          </p>
+          <button
+            onClick={() => {
+              setBreaks((arr) => [...arr, { ...DEFAULT_BREAK }]);
+              setResult(null);
+            }}
+            title="休憩を 1 件追加する"
+            style={{ ...CLEAR_BTN_STYLE, marginTop: '6px' }}
+          >
+            ＋ 休憩を追加
+          </button>
         </Section>
 
         <Section role="input" title="車両コスト（最適化パラメータ）" dataTour="vehicle-cost">

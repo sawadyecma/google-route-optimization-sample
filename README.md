@@ -43,6 +43,26 @@ GOOGLE_PROJECT_ID=your-project-id-here
 
 ## 実行
 
+### ソルバーだけ使うサンプル（自前の移動コスト行列を注入）
+
+移動時間・距離を自前で計算し、Google には最適化だけをやらせる構成のサンプル（仮想 10 地点）。
+
+```bash
+make dev-solver
+# 対称行列との比較
+npm run --workspace=cmd dev:solver -- --no-penalty
+```
+
+Web UI から触る場合は `make dev-server` と `make dev-web` を起動し、ヘッダーのタブから選びます。
+
+- **ソルバー（実地図）**: Google マップ上の実座標から行列を作る
+- **ソルバー（仮想フィールド）**: 地図を使わず、フレーム上に置いた地点の直線距離から行列を作る
+
+どちらも地点の選択・出発地/帰着地の指定・行列パラメータ・方向別ペナルティをその場で変えて再計算でき、
+生成された行列と送信 JSON も確認できます。
+
+詳細は [docs/solver-only-mode.md](./docs/solver-only-mode.md)。
+
 ### CLI（cmd）で API を実行
 
 ```bash

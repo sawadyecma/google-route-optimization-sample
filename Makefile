@@ -1,4 +1,4 @@
-.PHONY: help install dev dev-cmd dev-web dev-server build build-cmd build-server start start-cmd start-server clean lint format env-setup watch
+.PHONY: help install dev dev-cmd dev-solver dev-web dev-server build build-cmd build-server start start-cmd start-server clean lint format env-setup watch
 
 help:
 	@echo "Google Route Optimization Sample - Available Commands"
@@ -8,6 +8,7 @@ help:
 	@echo ""
 	@echo "Development:"
 	@echo "  make dev-cmd       Run cmd in development mode (ts-node)"
+	@echo "  make dev-solver    Run solver-only sample (自前行列を注入する 10 地点サンプル)"
 	@echo "  make dev-web       Run web in development mode (Vite)"
 	@echo "  make dev-server    Run API server in development mode (ts-node-dev)"
 	@echo "  make dev           Run all workspaces (開発モード)"
@@ -30,6 +31,9 @@ install:
 
 dev-cmd:
 	npm run --workspace=cmd dev
+
+dev-solver:
+	npm run --workspace=cmd dev:solver
 
 dev-web:
 	npm run --workspace=web dev

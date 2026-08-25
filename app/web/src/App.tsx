@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { LoadScript } from '@react-google-maps/api';
 import { EditorPage } from './pages/EditorPage';
+import { SolverPlaygroundPage } from './pages/SolverPlaygroundPage';
+import { SolverFieldPage } from './pages/SolverFieldPage';
 import { BrandMark, BRAND_GRADIENT } from './components/Brand';
 import { Tour } from './components/Tour';
 import { TOUR_STEPS } from './lib/tourSteps';
@@ -14,8 +16,25 @@ const googleMapsApiKey = (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | u
 // チュートリアルツアーを初回だけ自動表示するための既読フラグ
 const TOUR_SEEN_KEY = 'route-studio.tourSeen';
 
+// ヘッダーのタブで切り替える画面。ルーターは入れず、状態ひとつで足りる規模に留める。
+type Page = 'editor' | 'solver' | 'field';
+const PAGES: { key: Page; label: string; hint: string }[] = [
+  { key: 'editor', label: 'エディタ', hint: '座標を送って Google に経路計算ごと任せる通常モード' },
+  {
+    key: 'solver',
+    label: 'ソルバー（実地図）',
+    hint: '実際の地図の座標から自前の移動コスト行列を作って注入し、最適化だけを API にやらせるモード',
+  },
+  {
+    key: 'field',
+    label: 'ソルバー（仮想フィールド）',
+    hint: '地図を使わず、フレーム上に置いた地点の直線距離から行列を作って最適化するモード',
+  },
+];
+
 function App() {
   const [tourOpen, setTourOpen] = useState(false);
+  const [page, setPage] = useState<Page>('editor');
 
   // 初回訪問時のみ自動でツアーを開く（レイアウト確定を待って少し遅延）
   useEffect(() => {
@@ -59,13 +78,36 @@ function App() {
             Route Studio
           </span>
 
-          {/* 使い方ツアーをいつでも再表示できるボタン */}
+          {/* 画面切り替えタブ */}
+          <nav style={{ display: 'flex', gap: '4px', marginLeft: '18px' }}>
+            {PAGES.map((p) => (
+              <button
+                key={p.key}
+                onClick={() => setPage(p.key)}
+                title={p.hint}
+                style={{
+                  border: 'none',
+                  background: page === p.key ? '#e8f0fe' : 'transparent',
+                  color: page === p.key ? '#1967d2' : '#5f6368',
+                  fontSize: '13px',
+                  fontWeight: page === p.key ? 700 : 500,
+                  padding: '6px 14px',
+                  borderRadius: '999px',
+                  cursor: 'pointer',
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </nav>
+
+          {/* 使い方ツアーをいつでも再表示できるボタン（エディタ画面のみ） */}
           <button
             onClick={() => setTourOpen(true)}
             title="使い方ツアーを表示"
             style={{
               marginLeft: 'auto',
-              display: 'inline-flex',
+              display: page === 'editor' ? 'inline-flex' : 'none',
               alignItems: 'center',
               gap: '5px',
               border: '1px solid #dadce0',
@@ -82,11 +124,18 @@ function App() {
           </button>
         </header>
 
-        <EditorPage />
+        {page === 'editor' && <EditorPage />}
+        {page === 'solver' && <SolverPlaygroundPage />}
+        {page === 'field' && <SolverFieldPage />}
       </div>
 
       {/* open になるたび key を変えて再マウントし、ステップを先頭へ初期化する */}
-      <Tour key={tourOpen ? 'tour-open' : 'tour-closed'} steps={TOUR_STEPS} open={tourOpen} onClose={closeTour} />
+      <Tour
+        key={tourOpen ? 'tour-open' : 'tour-closed'}
+        steps={TOUR_STEPS}
+        open={tourOpen && page === 'editor'}
+        onClose={closeTour}
+      />
     </LoadScript>
   );
 }

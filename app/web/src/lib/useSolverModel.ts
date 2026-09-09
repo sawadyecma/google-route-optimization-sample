@@ -16,8 +16,8 @@ import {
 const apiBase =
   (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:3000';
 
-// 日付は「当日」固定にして、UI では時刻（hh:mm）だけを扱う。
-// 日をまたぐ行程を組みたくなったら、ここを日付付きに戻す。
+// 既定では日付を「当日」に倒し、UI では時刻（hh:mm）だけを扱う。
+// 日をまたぐ行程を組みたいときだけ、日付指定（dateEnabled）を ON にして日付も送る。
 export const TODAY = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }); // YYYY-MM-DD
 
 // 全体時間枠の既定値（当日の 8:00〜23:00）
@@ -28,7 +28,14 @@ export const DEFAULT_GLOBAL_END = '23:00';
 // mode は「この範囲で縛りたいのが到着時刻か出発時刻か」。
 // API の VisitRequest.timeWindows は到着（訪問開始）しか縛れないため、
 // 出発で指定された場合は作業時間ぶん前倒しして到着の枠に変換する。
-export type PlaceTimeWindow = { mode: 'arrival' | 'departure'; from: string; to: string };
+// fromDate / toDate は日付指定が ON のときだけ使う（未設定なら当日扱い）。
+export type PlaceTimeWindow = {
+  mode: 'arrival' | 'departure';
+  from: string;
+  to: string;
+  fromDate?: string;
+  toDate?: string;
+};
 
 export const EMPTY_TIME_WINDOW: PlaceTimeWindow = { mode: 'arrival', from: '', to: '' };
 
@@ -37,10 +44,10 @@ export const EMPTY_TIME_WINDOW: PlaceTimeWindow = { mode: 'arrival', from: '', t
 export const START_WINDOW_KEY = '__vehicle_start';
 export const END_WINDOW_KEY = '__vehicle_end';
 
-// hh:mm（当日・JST）→ RFC3339。offsetMinutes ぶんずらせる。
-const isoAt = (hhmm: string, offsetMinutes = 0): string | undefined => {
+// hh:mm ＋ YYYY-MM-DD（JST）→ RFC3339。offsetMinutes ぶんずらせる。
+const isoAt = (hhmm: string, date: string, offsetMinutes = 0): string | undefined => {
   if (!hhmm) return undefined;
-  const d = new Date(`${TODAY}T${hhmm}:00+09:00`);
+  const d = new Date(`${date || TODAY}T${hhmm}:00+09:00`);
   if (Number.isNaN(d.getTime())) return undefined;
   return new Date(d.getTime() + offsetMinutes * 60_000).toISOString();
 };
@@ -100,7 +107,13 @@ export function useSolverModel<T extends PlaceBase>(config: SolverModelConfig<T>
   const [costPerKilometer, setCostPerKilometer] = useState(40);
   const [globalStart, setGlobalStart] = useState(DEFAULT_GLOBAL_START);
   const [globalEnd, setGlobalEnd] = useState(DEFAULT_GLOBAL_END);
+  // 日付指定。OFF（既定）だと全部の時間枠が「当日」に倒れ、UI は時刻だけを扱う。
+  const [dateEnabled, setDateEnabled] = useState(false);
+  const [globalStartDate, setGlobalStartDate] = useState(TODAY);
+  const [globalEndDate, setGlobalEndDate] = useState(TODAY);
   const [timeWindows, setTimeWindows] = useState<Record<string, PlaceTimeWindow>>({});
+  // 「どの地点もスキップさせない」。全体終了時刻を自動で延ばして未訪問をなくす（下記 autoGlobalEndIso）。
+  const [noSkip, setNoSkip] = useState(false);
 
   const [result, setResult] = useState<OptimizeResult | null>(null);
   const [resultSignature, setResultSignature] = useState<string | null>(null);
@@ -154,13 +167,71 @@ export function useSolverModel<T extends PlaceBase>(config: SolverModelConfig<T>
     [srcPlaces, dstPlaces, activePenalties, params],
   );
 
+  // --- 時間枠（日付 + 時刻 → RFC3339） --------------------------------------
+  // 日付指定が OFF のときは、保持している日付を無視して当日に倒す。
+  const dateOr = (date?: string) => (dateEnabled ? date || TODAY : TODAY);
+
+  const globalStartIso =
+    isoAt(globalStart, dateOr(globalStartDate)) ?? isoAt(DEFAULT_GLOBAL_START, TODAY)!;
+  const globalEndIso = isoAt(globalEnd, dateOr(globalEndDate)) ?? isoAt(DEFAULT_GLOBAL_END, TODAY)!;
+
+  // 終了が開始以前だと API が 400 を返すので、送る前に UI で気付けるようにする
+  const globalWindowInvalid = Date.parse(globalEndIso) <= Date.parse(globalStartIso);
+
+  // 個別に指定された時間枠の絶対時刻（自動延長の基準に使う）
+  const windowInstants = useMemo(() => {
+    const out: number[] = [];
+    Object.values(timeWindows).forEach((w) => {
+      [
+        [w.from, w.fromDate],
+        [w.to, w.toDate],
+      ].forEach(([hhmm, date]) => {
+        const iso = isoAt(hhmm ?? '', dateOr(date));
+        if (iso) out.push(Date.parse(iso));
+      });
+    });
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeWindows, dateEnabled]);
+
+  // どんな訪問順でも必ず収まる所要時間の上限（最長区間 × 区間数 + 作業時間の総和）。
+  const routeUpperBoundSeconds = useMemo(() => {
+    const maxLeg = matrix.seconds.reduce(
+      (max, row) => row.reduce((m, sec) => Math.max(m, sec), max),
+      0,
+    );
+    return (stops.length + 1) * maxLeg + stops.length * Math.max(0, visitMinutes) * 60;
+  }, [matrix, stops.length, visitMinutes]);
+
+  // 「スキップさせない」ときに実際に送る全体終了時刻。
+  //
+  // 実測では penaltyCost 未設定（＝仕様上は必須）の shipment でも、全体時間枠に収まらない分は
+  // skippedShipments に落ちて解が返る。penaltyCost をいくら上げても防げない
+  // （理由コードは CANNOT_BE_PERFORMED_WITHIN_VEHICLE_TIME_WINDOWS）。
+  // 唯一効くのは枠そのものを広げることなので、「必ず収まる終了時刻」まで延ばす。
+  // 車両のコストは時間あたりで効くため、枠を広げても解は最短のまま変わらない。
+  const autoGlobalEndIso = useMemo(() => {
+    if (!noSkip) return globalEndIso;
+    const base = Math.max(Date.parse(globalStartIso), ...windowInstants);
+    const candidate = base + routeUpperBoundSeconds * 1000;
+    const ms = Math.max(Date.parse(globalEndIso), candidate);
+    // 秒以下を丸めて JSON を読みやすくする
+    return new Date(Math.ceil(ms / 60_000) * 60_000).toISOString();
+  }, [noSkip, globalStartIso, globalEndIso, windowInstants, routeUpperBoundSeconds]);
+
+  // 自動延長が実際に効いたか（UI の注記用）
+  const globalEndExtended = autoGlobalEndIso !== globalEndIso;
+
   const request = useMemo(() => {
     if (!startPlace || !endPlace || stops.length === 0) return null;
 
     const windowOf = (id: string, offsetMinutes = 0) => {
       const w = timeWindows[id];
       if (!w || (!w.from && !w.to)) return undefined;
-      return { startTime: isoAt(w.from, offsetMinutes), endTime: isoAt(w.to, offsetMinutes) };
+      return {
+        startTime: isoAt(w.from, dateOr(w.fromDate), offsetMinutes),
+        endTime: isoAt(w.to, dateOr(w.toDate), offsetMinutes),
+      };
     };
 
     // 訪問先は「出発で指定されたら作業時間ぶん前倒しして到着の枠にする」
@@ -182,13 +253,15 @@ export function useSolverModel<T extends PlaceBase>(config: SolverModelConfig<T>
         visitMinutes,
         costPerHour,
         costPerKilometer,
-        globalStartTime: isoAt(globalStart) ?? isoAt(DEFAULT_GLOBAL_START)!,
-        globalEndTime: isoAt(globalEnd) ?? isoAt(DEFAULT_GLOBAL_END)!,
+        globalStartTime: globalStartIso,
+        globalEndTime: autoGlobalEndIso,
       },
       startTimeWindow: windowOf(START_WINDOW_KEY),
       endTimeWindow: windowOf(END_WINDOW_KEY),
       stopTimeWindows,
     });
+    // dateOr は dateEnabled しか見ていないので、依存は dateEnabled で足りる
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     srcPlaces,
     dstPlaces,
@@ -199,9 +272,10 @@ export function useSolverModel<T extends PlaceBase>(config: SolverModelConfig<T>
     visitMinutes,
     costPerHour,
     costPerKilometer,
-    globalStart,
-    globalEnd,
+    globalStartIso,
+    autoGlobalEndIso,
     timeWindows,
+    dateEnabled,
   ]);
 
   const requestJson = useMemo(() => (request ? JSON.stringify(request, null, 2) : ''), [request]);
@@ -270,6 +344,22 @@ export function useSolverModel<T extends PlaceBase>(config: SolverModelConfig<T>
   const selectAll = () => setSelectedIds(places.map((p) => p.id));
   const selectNone = () => setSelectedIds([]);
 
+  // 「全部外す」（selectNone）は選択を外すだけなので地点は残る。
+  // こちらは地点そのものを消して、まっさらな状態から置き直せるようにする。
+  // 初期地点も含めて消えるが、「初期状態に戻す」でいつでも復帰できる。
+  const removeAllPlaces = () => {
+    setPlaces([]);
+    setSelectedIds([]);
+    setPenalties([]);
+    setTimeWindows({});
+    setStartId('');
+    setEndId('');
+    // 消えた地点を指す結果を残すと訪問順が読めなくなるので捨てる
+    setResult(null);
+    setResultSignature(null);
+    setError(null);
+  };
+
   // 後から足した地点だけは削除できる（初期地点は選択解除で対応する）
   const removePlace = (id: string) => {
     const fallback = places.find((p) => p.id !== id)?.id ?? '';
@@ -301,6 +391,10 @@ export function useSolverModel<T extends PlaceBase>(config: SolverModelConfig<T>
     setTimeWindows({});
     setGlobalStart(DEFAULT_GLOBAL_START);
     setGlobalEnd(DEFAULT_GLOBAL_END);
+    setDateEnabled(false);
+    setGlobalStartDate(TODAY);
+    setGlobalEndDate(TODAY);
+    setNoSkip(false);
     setResult(null);
     setResultSignature(null);
     setBaseline(null);
@@ -317,7 +411,8 @@ export function useSolverModel<T extends PlaceBase>(config: SolverModelConfig<T>
   const removePenalty = (id: string) => setPenalties((prev) => prev.filter((p) => p.id !== id));
 
   // --- 実行 -----------------------------------------------------------------
-  const canRun = request !== null && payloadBytes <= SYNC_PAYLOAD_LIMIT_BYTES;
+  const canRun =
+    request !== null && payloadBytes <= SYNC_PAYLOAD_LIMIT_BYTES && !globalWindowInvalid;
 
   const run = async () => {
     if (!canRun || !request) return;
@@ -389,6 +484,7 @@ export function useSolverModel<T extends PlaceBase>(config: SolverModelConfig<T>
     movePlace,
     renamePlace,
     removePlace,
+    removeAllPlaces,
     toggleSelected,
     selectAll,
     selectNone,
@@ -410,6 +506,17 @@ export function useSolverModel<T extends PlaceBase>(config: SolverModelConfig<T>
     setGlobalStart,
     globalEnd,
     setGlobalEnd,
+    dateEnabled,
+    setDateEnabled,
+    globalStartDate,
+    setGlobalStartDate,
+    globalEndDate,
+    setGlobalEndDate,
+    globalWindowInvalid,
+    noSkip,
+    setNoSkip,
+    autoGlobalEndIso,
+    globalEndExtended,
     timeWindows,
     setTimeWindow,
     clearTimeWindow,

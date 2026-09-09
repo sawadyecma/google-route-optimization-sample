@@ -7,6 +7,7 @@ import { type BuiltMatrix, type PlaceBase, SYNC_PAYLOAD_LIMIT_BYTES } from '../l
 import {
   END_WINDOW_KEY,
   START_WINDOW_KEY,
+  TODAY,
   type PlaceTimeWindow,
   type SolverModel,
 } from '../lib/useSolverModel';
@@ -40,6 +41,15 @@ const fmtTime = (iso?: string, base?: string) => {
   });
   return base && dateOf(iso) !== dateOf(base) ? `${dateOf(iso)} ${t}` : t;
 };
+// 自動延長した終了時刻など、日付まで見せたいとき用
+const fmtDateTime = (iso: string) =>
+  new Date(iso).toLocaleString('ja-JP', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: JST,
+  });
 const fmtKm = (m?: number) => `${((m ?? 0) / 1000).toFixed(1)} km`;
 const fmtBytes = (b: number) => (b < 1024 ? `${b} B` : `${(b / 1024).toFixed(1)} KB`);
 // 行列の見出し用。「神奈川県庁」→「神奈」
@@ -87,6 +97,65 @@ const NumberField: React.FC<{
   </label>
 );
 
+
+// 時間枠の 1 レンジぶんの入力。日付指定が ON のときだけ日付欄を並べ、
+// 横幅が足りなくなるので「開始 / 終了」の 2 行に折り返す。
+const WindowRange: React.FC<{
+  withDate: boolean;
+  from: string;
+  fromDate: string;
+  to: string;
+  toDate: string;
+  onFrom: (v: string) => void;
+  onFromDate: (v: string) => void;
+  onTo: (v: string) => void;
+  onToDate: (v: string) => void;
+}> = ({ withDate, from, fromDate, to, toDate, onFrom, onFromDate, onTo, onToDate }) => {
+  const line = (
+    label: string,
+    time: string,
+    date: string,
+    onTime: (v: string) => void,
+    onDate: (v: string) => void,
+  ) => (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+      {withDate && (
+        <>
+          <span style={{ width: '24px', flexShrink: 0, fontSize: '10px', color: color.textMuted }}>
+            {label}
+          </span>
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => onDate(e.target.value)}
+            style={{ ...dateInputStyle, width: '112px' }}
+          />
+        </>
+      )}
+      <input
+        type="time"
+        value={time}
+        onChange={(e) => onTime(e.target.value)}
+        style={dateInputStyle}
+      />
+    </span>
+  );
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: withDate ? 'column' : 'row',
+        alignItems: withDate ? 'flex-start' : 'center',
+        gap: '4px',
+      }}
+    >
+      {line('開始', from, fromDate, onFrom, onFromDate)}
+      {!withDate && <span style={{ color: color.textMuted, fontSize: '10px' }}>〜</span>}
+      {line('終了', to, toDate, onTo, onToDate)}
+    </div>
+  );
+};
 
 // S / E を割り当てるトグル
 const RoleToggle: React.FC<{
@@ -236,6 +305,7 @@ export function SolverSidebar<T extends PlaceBase>({
     defaultIds,
     renamePlace,
     removePlace,
+    removeAllPlaces,
     toggleSelected,
     selectAll,
     selectNone,
@@ -255,6 +325,17 @@ export function SolverSidebar<T extends PlaceBase>({
     setGlobalStart,
     globalEnd,
     setGlobalEnd,
+    dateEnabled,
+    setDateEnabled,
+    globalStartDate,
+    setGlobalStartDate,
+    globalEndDate,
+    setGlobalEndDate,
+    globalWindowInvalid,
+    noSkip,
+    setNoSkip,
+    autoGlobalEndIso,
+    globalEndExtended,
     timeWindows,
     setTimeWindow,
     clearTimeWindow,
@@ -462,8 +543,25 @@ export function SolverSidebar<T extends PlaceBase>({
             <button onClick={selectAll} style={smallButton(color.blue)}>
               全部訪問
             </button>
-            <button onClick={selectNone} style={smallButton(color.textSub)}>
+            <button
+              onClick={selectNone}
+              title="地点は残したまま、訪問先の選択だけを外します"
+              style={smallButton(color.textSub)}
+            >
               全部外す
+            </button>
+            <button
+              onClick={removeAllPlaces}
+              disabled={places.length === 0}
+              title="地点そのものを全部消して、まっさらな状態から置き直します（「初期状態に戻す」で復帰できます）"
+              style={{
+                ...smallButton(color.red),
+                color: places.length === 0 ? color.textMuted : color.red,
+                borderColor: places.length === 0 ? color.borderStrong : `${color.red}80`,
+                cursor: places.length === 0 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              全部除去
             </button>
             {extraPlaceActions}
             <button onClick={resetAll} style={smallButton(color.textSub)}>
@@ -477,25 +575,120 @@ export function SolverSidebar<T extends PlaceBase>({
 
         {/* 2. 時間枠 */}
       <Section role="input" title="時間枠（到着・出発の許容レンジ）">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px' }}>
-          <span style={{ color: color.textSub, width: '58px', flexShrink: 0 }}>全体時間枠</span>
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: space.xs,
+            fontSize: '11px',
+            marginBottom: space.sm,
+          }}
+        >
           <input
-            type="time"
-            value={globalStart}
-            onChange={(e) => setGlobalStart(e.target.value)}
-            style={dateInputStyle}
+            type="checkbox"
+            checked={dateEnabled}
+            onChange={(e) => setDateEnabled(e.target.checked)}
           />
-          <span style={{ color: color.textMuted }}>〜</span>
-          <input
-            type="time"
-            value={globalEnd}
-            onChange={(e) => setGlobalEnd(e.target.value)}
-            style={dateInputStyle}
+          <span>
+            日付も指定する（外すと<strong>すべて当日</strong>の時刻として扱います）
+          </span>
+        </label>
+
+        <div
+          style={{
+            display: 'flex',
+            alignItems: dateEnabled ? 'flex-start' : 'center',
+            gap: '4px',
+            fontSize: '10px',
+          }}
+        >
+          <span
+            style={{
+              color: color.textSub,
+              width: '58px',
+              flexShrink: 0,
+              paddingTop: dateEnabled ? '3px' : 0,
+            }}
+          >
+            全体時間枠
+          </span>
+          <WindowRange
+            withDate={dateEnabled}
+            from={globalStart}
+            fromDate={globalStartDate}
+            to={globalEnd}
+            toDate={globalEndDate}
+            onFrom={setGlobalStart}
+            onFromDate={setGlobalStartDate}
+            onTo={setGlobalEnd}
+            onToDate={setGlobalEndDate}
           />
         </div>
         <p style={{ margin: `4px 0 ${space.sm}`, color: color.textMuted, fontSize: '10px' }}>
-          全ルートがこの範囲で完結します（日付は当日固定）。以下の各枠もこの範囲に収めてください。
+          全ルートがこの範囲で完結します{dateEnabled ? '' : '（日付は当日固定）'}
+          。以下の各枠もこの範囲に収めてください。
         </p>
+
+        {globalWindowInvalid && (
+          <p
+            style={{
+              margin: `0 0 ${space.sm}`,
+              padding: `4px ${space.sm}`,
+              backgroundColor: '#fce8e6',
+              borderRadius: radius.sm,
+              color: '#c5221f',
+              fontSize: '10px',
+            }}
+          >
+            全体時間枠の終了が開始以前になっています。
+            {dateEnabled
+              ? '日付を含めて開始より後になるよう直してください。'
+              : '日をまたぐ枠にしたい場合は「日付も指定する」を ON にしてください。'}
+          </p>
+        )}
+
+        {/* どの地点もスキップさせない */}
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: space.xs,
+            fontSize: '11px',
+            marginBottom: '4px',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={noSkip}
+            onChange={(e) => setNoSkip(e.target.checked)}
+            style={{ marginTop: '2px', flexShrink: 0 }}
+          />
+          <span>どの地点もスキップさせない（全体時間枠を自動で延長する）</span>
+        </label>
+        <p style={{ margin: `0 0 ${space.sm}`, color: color.textMuted, fontSize: '10px', lineHeight: 1.6 }}>
+          API は <code>penaltyCost</code> 未設定（＝必須）の地点でも、全体時間枠に収まらない分は
+          <strong>スキップして解を返します</strong>（理由コード
+          <code>CANNOT_BE_PERFORMED_WITHIN_VEHICLE_TIME_WINDOWS</code>）。
+          penaltyCost をいくら上げても防げないため、ここを ON にすると
+          <strong>必ず全地点が収まる終了時刻</strong>まで枠を広げて送ります。
+          コストは時間あたりで効くので、枠を広げても解は最短のままです。
+          <br />
+          ※ E（帰着）や各地点に明示した枠は残るので、それ自体が守れない地点は依然スキップされます。
+        </p>
+        {noSkip && globalEndExtended && (
+          <p
+            style={{
+              margin: `0 0 ${space.sm}`,
+              padding: `4px ${space.sm}`,
+              backgroundColor: '#e6f4ea',
+              borderRadius: radius.sm,
+              color: '#137333',
+              fontSize: '10px',
+            }}
+          >
+            全体終了時刻を <strong>{fmtDateTime(autoGlobalEndIso)}</strong> まで自動延長して送ります。
+          </p>
+        )}
 
         {timeWindowRows.map((row) => {
           const w = timeWindows[row.key];
@@ -567,21 +760,17 @@ export function SolverSidebar<T extends PlaceBase>({
                   </button>
                 )}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <input
-                  type="time"
-                  value={w?.from ?? ''}
-                  onChange={(e) => setTimeWindow(row.key, { from: e.target.value })}
-                  style={dateInputStyle}
-                />
-                <span style={{ color: color.textMuted, fontSize: '10px' }}>〜</span>
-                <input
-                  type="time"
-                  value={w?.to ?? ''}
-                  onChange={(e) => setTimeWindow(row.key, { to: e.target.value })}
-                  style={dateInputStyle}
-                />
-              </div>
+              <WindowRange
+                withDate={dateEnabled}
+                from={w?.from ?? ''}
+                fromDate={w?.fromDate ?? TODAY}
+                to={w?.to ?? ''}
+                toDate={w?.toDate ?? TODAY}
+                onFrom={(v) => setTimeWindow(row.key, { from: v })}
+                onFromDate={(v) => setTimeWindow(row.key, { fromDate: v })}
+                onTo={(v) => setTimeWindow(row.key, { to: v })}
+                onToDate={(v) => setTimeWindow(row.key, { toDate: v })}
+              />
             </div>
           );
         })}
@@ -841,9 +1030,20 @@ export function SolverSidebar<T extends PlaceBase>({
           >
             {loading ? '最適化中…' : 'ソルバーを実行'}
           </button>
-          {stops.length === 0 && (
+          {places.length === 0 ? (
             <p style={{ margin: `${space.xs} 0 0`, fontSize: '11px', color: color.textMuted }}>
-              訪問先が 1 つも選択されていません（出発地・帰着地は訪問先に含まれません）。
+              地点がありません。キャンバスをクリックして置くか、「初期状態に戻す」で戻せます。
+            </p>
+          ) : (
+            stops.length === 0 && (
+              <p style={{ margin: `${space.xs} 0 0`, fontSize: '11px', color: color.textMuted }}>
+                訪問先が 1 つも選択されていません（出発地・帰着地は訪問先に含まれません）。
+              </p>
+            )
+          )}
+          {globalWindowInvalid && (
+            <p style={{ margin: `${space.xs} 0 0`, fontSize: '11px', color: color.red }}>
+              全体時間枠が不正なので実行できません（終了が開始以前）。
             </p>
           )}
           {stale && (
@@ -1021,8 +1221,10 @@ export function SolverSidebar<T extends PlaceBase>({
                   {skipped.map((s) => stops[s.index ?? 0]?.name ?? '?').join(', ')}
                 </strong>
                 <div style={{ marginTop: '2px', fontSize: '10px' }}>
-                  全体時間枠や各地点の時間枠に収まらないと、ここに落ちます。終了時刻を延ばす・
-                  平均速度を上げる・訪問先を減らす、のいずれかで解消できます。
+                  全体時間枠や各地点の時間枠に収まらないと、ここに落ちます。
+                  時間枠セクションの「<strong>どの地点もスキップさせない</strong>」を ON にすると
+                  全体時間枠を自動で延ばして解消できます（終了時刻を延ばす・平均速度を上げる・
+                  訪問先を減らす、でも同じことができます）。
                 </div>
               </div>
             )}
